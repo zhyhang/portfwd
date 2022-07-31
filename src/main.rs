@@ -15,7 +15,7 @@ fn main() {
 
 fn local_listen(ip_port: &str, tp: &ThreadPool) {
     let listener = TcpListener::bind(ip_port).unwrap();
-    // accept connections and process them, spawning a new thread for each one
+    // accept connections and process them, submit task to thread pool
     println!("Local port listening on {}", ip_port);
     for stream in listener.incoming().take(2) {
         let stream = stream.unwrap();
