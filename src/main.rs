@@ -17,18 +17,28 @@ fn main() {
     println!("Shutting down.");
 }
 
+#[derive(Clone, Debug)]
+struct SocketTun {
+    target_addr: &'static str,
+    source: Option<Arc<Mutex<TcpStream>>>,
+    target: Option<Arc<Mutex<TcpStream>>>,
+}
 
-fn listen_accept(local_addr: &str, remote_addr: &str, pool: &ThreadPool) {
+
+fn listen_accept(local_addr: &'static str, remote_addr: &'static str, pool: &ThreadPool) {
     let listener = TcpListener::bind(local_addr).unwrap();
     // accept connections and process them, submit task to thread pool
     println!("Local port listening on {}", local_addr);
-    let remote_addr_string = remote_addr.to_string();
-    for stream in listener.incoming().take(2) {
+    for stream in listener.incoming() {
         let stream = Arc::new(Mutex::new(stream.unwrap()));
         println!("Accept a connection from {}", stream.lock().unwrap().peer_addr().unwrap());
-        let remote_addr_clone = remote_addr_string.clone();
+        let socket_tun = Arc::new(Mutex::new(SocketTun {
+            target_addr: remote_addr,
+            source: Some(stream),
+            target: None,
+        }));
         pool.execute(move || {
-            establish_sync(stream.clone(), None, &remote_addr_clone)
+            establish_sync(socket_tun.clone())
         });
     }
     // close the socket server
@@ -65,16 +75,20 @@ fn handle_connection(mut stream: TcpStream) -> bool {
     true
 }
 
+
 /// establish remote connect then synchronize data between source and target
-fn establish_sync(server_stream: Arc<Mutex<TcpStream>>, mut client_stream_opt: Option<Arc<Mutex<TcpStream>>>, remote_addr: &String) -> bool {
-    if client_stream_opt.is_some() {
-        let client_stream_opt = client_stream_opt.as_ref().unwrap();
-        println!("Sync data from source {} to target {}", server_stream.lock().unwrap().peer_addr().unwrap(), client_stream_opt.lock().unwrap().peer_addr().unwrap());
-        return sync_data(server_stream, client_stream_opt);
+fn establish_sync(mut socket_tun: Arc<Mutex<SocketTun>>) -> bool {
+    let mut socket_tun = socket_tun.lock().unwrap();
+    let server_stream = socket_tun.source.as_ref().unwrap();
+    if socket_tun.target.is_some() {
+        let client_stream = socket_tun.target.as_ref().unwrap();
+        println!("Sync data from {} to {}", server_stream.lock().unwrap().peer_addr().unwrap(), client_stream.lock().unwrap().peer_addr().unwrap());
+        return sync_data(server_stream, client_stream);
     }
+    let remote_addr = socket_tun.target_addr;
     match TcpStream::connect(remote_addr) {
         Ok(mut client_stream) => {
-            client_stream_opt.replace(Arc::new(Mutex::new(client_stream)));
+            socket_tun.target.replace(Arc::new(Mutex::new(client_stream)));
             println!("Successfully connected to remote in {}", remote_addr);
             return true;
         }
@@ -87,7 +101,7 @@ fn establish_sync(server_stream: Arc<Mutex<TcpStream>>, mut client_stream_opt: O
     }
 }
 
-fn sync_data(source: Arc<Mutex<TcpStream>>, target: &Arc<Mutex<TcpStream>>) -> bool {
+fn sync_data(source: &Arc<Mutex<TcpStream>>, target: &Arc<Mutex<TcpStream>>) -> bool {
     let mut s_mutex = source.lock().unwrap();
     let mut t_mutex = target.lock().unwrap();
     let s = s_mutex.deref_mut();
@@ -98,13 +112,16 @@ fn sync_data(source: Arc<Mutex<TcpStream>>, target: &Arc<Mutex<TcpStream>>) -> b
 fn copy_data(source: &mut TcpStream, target: &mut TcpStream) -> bool {
     let src_addr = source.peer_addr().unwrap();
     let target_addr = target.peer_addr().unwrap();
+    println!("debug from {} to {}", src_addr, target_addr);
+    // let mut buffer = [0; 1024];
+    // let count = source.read(&mut buffer).unwrap();
     match io::copy(source, target) {
         Ok(size) => {
             println!("Copy {} bytes from {} to {}", size, src_addr, target_addr);
             return true;
         }
         Err(e) => {
-            println!("Copy from {} to {} err {}", src_addr, target_addr, e);
+            println!("Copy from {} to {} error {}", src_addr, target_addr, e);
             source.shutdown(Shutdown::Both);
             target.shutdown(Shutdown::Both);
             return false;
