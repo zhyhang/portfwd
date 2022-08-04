@@ -23,18 +23,17 @@ fn local_listen(local_addr: &str, remote_addr: &str, tp: &ThreadPool) {
     println!("Local port listening on {}", local_addr);
     let remote_addr_string = remote_addr.to_string();
     for stream in listener.incoming().take(2) {
-        let mut stream = stream.unwrap();
-        let stream_arc = Arc::new(Mutex::new(stream));
+        let stream = Arc::new(Mutex::new(stream.unwrap()));
         let remote_addr_clone = remote_addr_string.clone();
         tp.execute(move || {
-            connect_sync( stream_arc.clone(), None, &remote_addr_clone)
+            connect_sync(stream.clone(), None, &remote_addr_clone)
         });
     }
     // close the socket server
     drop(listener);
 }
 
-fn handle_connection(mut stream: TcpStream) -> bool{
+fn handle_connection(mut stream: TcpStream) -> bool {
     let mut buffer = [0; 1024];
     stream.read(&mut buffer).unwrap();
 
@@ -64,8 +63,8 @@ fn handle_connection(mut stream: TcpStream) -> bool{
     true
 }
 
-fn connect_sync(server_stream: Arc<Mutex<TcpStream>>, mut client_stream_opt: Option< Arc<Mutex<TcpStream>>>, remote_addr: &String) -> bool {
-    if client_stream_opt.is_some(){
+fn connect_sync(server_stream: Arc<Mutex<TcpStream>>, mut client_stream_opt: Option<Arc<Mutex<TcpStream>>>, remote_addr: &String) -> bool {
+    if client_stream_opt.is_some() {
         sync_data(server_stream, client_stream_opt.as_ref().unwrap());
     }
     match TcpStream::connect(remote_addr) {
@@ -80,13 +79,12 @@ fn connect_sync(server_stream: Arc<Mutex<TcpStream>>, mut client_stream_opt: Opt
         }
     }
     true
-
 }
 
 fn sync_data(source: Arc<Mutex<TcpStream>>, target: &Arc<Mutex<TcpStream>>) {
     let mut s = source.lock().unwrap();
     let mut t = target.lock().unwrap();
-    let mut buff = [0;1024];
+    let mut buff = [0; 1024];
     s.read(&mut buff);
     t.write(&buff);
     // io::copy(s, t)
