@@ -25,17 +25,16 @@ fn local_listen(local_addr: &str, remote_addr: &str, tp: &ThreadPool) {
     for stream in listener.incoming().take(2) {
         let stream = stream.unwrap();
         let remote_addr_clone = remote_addr_string.clone();
-
         tp.execute(move || {
-            // handle_connection(stream);
-            connect_remote(stream, &remote_addr_clone);
+            // connect_sync( stream, None, &remote_addr_clone)
+            handle_connection(stream)
         });
     }
     // close the socket server
     drop(listener);
 }
 
-fn handle_connection(mut stream: TcpStream) {
+fn handle_connection(mut stream: TcpStream) -> bool{
     let mut buffer = [0; 1024];
     stream.read(&mut buffer).unwrap();
 
@@ -62,29 +61,36 @@ fn handle_connection(mut stream: TcpStream) {
 
     stream.write(response.as_bytes()).unwrap();
     stream.flush().unwrap();
+    true
 }
 
-fn connect_remote(mut server_stream: TcpStream, remote_addr: &String) {
+fn connect_sync(mut server_stream: TcpStream, mut client_stream_opt: Option< &mut TcpStream>, remote_addr: &String) -> bool {
+    // if client_stream_opt.is_some(){
+    //     sync_data(server_stream, client_stream_opt.unwrap());
+    // }
     match TcpStream::connect(remote_addr) {
         Ok(mut client_stream) => {
+            client_stream_opt.replace(&mut client_stream);
             println!("Successfully connected to server in {}", remote_addr);
         }
         Err(e) => {
             println!("Failed to connect: {} {}", remote_addr, e);
+            server_stream.shutdown(Shutdown::Both);// shutdown stream from outer client
+            return false;
         }
     }
+    true
+
 }
 
-fn sync_data(source: &mut TcpStream, target: &mut TcpStream, tp: &ThreadPool) {
-    match io::copy(source, target) {
+fn sync_data(mut source: TcpStream, target: &mut TcpStream) {
+    match io::copy(&mut source, target) {
         Ok(_) => {
-            // tp.execute(||{
-            //     sync_data(target, source, tp); //put thread pool again to transfer data from target to source
-            // })
         }
         Err(e) => {
             println!("Copy from {} to {} err {}", source.peer_addr().unwrap(), target.peer_addr().unwrap(), e);
             source.shutdown(Shutdown::Both);
+            target.shutdown(Shutdown::Both);
         }
     }
 }
