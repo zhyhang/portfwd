@@ -1,5 +1,5 @@
 use std::{fs, io, thread};
-use std::io::{Read, Write};
+use std::io::{Error, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::ops::DerefMut;
 use std::rc::Rc;
@@ -110,21 +110,32 @@ fn sync_data(source: &Arc<Mutex<TcpStream>>, target: &Arc<Mutex<TcpStream>>) -> 
 }
 
 fn copy_data(source: &mut TcpStream, target: &mut TcpStream) -> bool {
-    let src_addr = source.peer_addr().unwrap();
-    let target_addr = target.peer_addr().unwrap();
-    println!("debug from {} to {}", src_addr, target_addr);
-    // let mut buffer = [0; 1024];
-    // let count = source.read(&mut buffer).unwrap();
-    match io::copy(source, target) {
-        Ok(size) => {
-            println!("Copy {} bytes from {} to {}", size, src_addr, target_addr);
-            return true;
-        }
-        Err(e) => {
-            println!("Copy from {} to {} error {}", src_addr, target_addr, e);
-            source.shutdown(Shutdown::Both);
-            target.shutdown(Shutdown::Both);
+    let mut buffer = [0; 8192];
+    // read from source
+    let result = source.read(&mut buffer);
+    if result.is_err() {
+        close_tun(source, target, result.as_ref().err());
+        return false;
+    }
+    let count = result.unwrap();
+    // write to target
+    if count > 0 {
+        let result = target.write(&buffer[0..count + 1]);
+        if result.is_err() {
+            close_tun(source, target, result.as_ref().err());
             return false;
         }
-    };
+    }
+    let src_addr = source.peer_addr().unwrap();
+    let target_addr = target.peer_addr().unwrap();
+    println!("Copy {} bytes from {} to {}", count, src_addr, target_addr);
+    true
+}
+
+fn close_tun(source: &TcpStream, target: &TcpStream, err: Option<&Error>) {
+    let src_addr = source.peer_addr().unwrap();
+    let target_addr = target.peer_addr().unwrap();
+    println!("Copy from {} to {} error {}", src_addr, target_addr, err.unwrap());
+    source.shutdown(Shutdown::Both);
+    target.shutdown(Shutdown::Both);
 }
