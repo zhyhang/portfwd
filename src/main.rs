@@ -1,41 +1,53 @@
-use std::net::{Shutdown, TcpListener, TcpStream};
 use std::{fs, io, thread};
-use std::io::{Read, Write};
+use std::io::{Error, Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
+use std::ops::DerefMut;
 use std::rc::Rc;
 use std::str::from_utf8;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
 use portfwd::ThreadPool;
 
 fn main() {
-    let host = "127.0.0.1";
-    let local_addr = host.to_string() + ":8080";
+    let local_addr = "0.0.0.0:8379";
     let remote_addr = "127.0.0.1:6379";
-    let tp = ThreadPool::new(6);
-    local_listen(&local_addr, remote_addr, &tp);
+    let pool = ThreadPool::new(6);
+    listen_accept(&local_addr, remote_addr, &pool);
     println!("Shutting down.");
 }
 
+#[derive(Clone, Debug)]
+struct SocketTun {
+    target_addr: &'static str,
+    source: Option<Arc<Mutex<TcpStream>>>,
+    target: Option<Arc<Mutex<TcpStream>>>,
+}
 
-fn local_listen(local_addr: &str, remote_addr: &str, tp: &ThreadPool) {
+
+fn listen_accept(local_addr: &'static str, remote_addr: &'static str, pool: &ThreadPool) {
     let listener = TcpListener::bind(local_addr).unwrap();
     // accept connections and process them, submit task to thread pool
     println!("Local port listening on {}", local_addr);
-    let remote_addr_string = remote_addr.to_string();
-    for stream in listener.incoming().take(2) {
+    for stream in listener.incoming() {
         let stream = stream.unwrap();
-        let remote_addr_clone = remote_addr_string.clone();
-
-        tp.execute(move || {
-            // handle_connection(stream);
-            connect_remote(stream, &remote_addr_clone);
+        stream.set_nonblocking(true).unwrap();
+        let stream = Arc::new(Mutex::new(stream));
+        println!("Accept a connection from {}", stream.lock().unwrap().peer_addr().unwrap());
+        let socket_tun = Arc::new(Mutex::new(SocketTun {
+            target_addr: remote_addr,
+            source: Some(stream),
+            target: None,
+        }));
+        pool.execute(move || {
+            establish_sync(socket_tun.clone())
         });
     }
     // close the socket server
     drop(listener);
 }
 
-fn handle_connection(mut stream: TcpStream) {
+fn handle_connection(mut stream: TcpStream) -> bool {
     let mut buffer = [0; 1024];
     stream.read(&mut buffer).unwrap();
 
@@ -62,29 +74,83 @@ fn handle_connection(mut stream: TcpStream) {
 
     stream.write(response.as_bytes()).unwrap();
     stream.flush().unwrap();
+    true
 }
 
-fn connect_remote(mut server_stream: TcpStream, remote_addr: &String) {
+
+/// establish remote connect then synchronize data between source and target
+fn establish_sync(mut socket_tun: Arc<Mutex<SocketTun>>) -> bool {
+    let mut socket_tun = socket_tun.lock().unwrap();
+    let server_stream = socket_tun.source.as_ref().unwrap();
+    if socket_tun.target.is_some() {
+        let client_stream = socket_tun.target.as_ref().unwrap();
+        // println!("Sync data from {} to {}", server_stream.lock().unwrap().peer_addr().unwrap(), client_stream.lock().unwrap().peer_addr().unwrap());
+        return sync_data(server_stream, client_stream);
+    }
+    let remote_addr = socket_tun.target_addr;
     match TcpStream::connect(remote_addr) {
         Ok(mut client_stream) => {
-            println!("Successfully connected to server in {}", remote_addr);
+            client_stream.set_nonblocking(true).unwrap();
+            socket_tun.target.replace(Arc::new(Mutex::new(client_stream)));
+            println!("Successfully connected to remote in {}", remote_addr);
+            return true;
         }
         Err(e) => {
-            println!("Failed to connect: {} {}", remote_addr, e);
+            let server_stream_mutex = server_stream.lock().unwrap();
+            println!("Failed to connect remote: {}, close client connection: {}, {}", remote_addr, server_stream_mutex.peer_addr().unwrap(), e);
+            server_stream_mutex.shutdown(Shutdown::Both);// shutdown stream from outer client
+            return false;
         }
     }
 }
 
-fn sync_data(source: &mut TcpStream, target: &mut TcpStream, tp: &ThreadPool) {
-    match io::copy(source, target) {
-        Ok(_) => {
-            // tp.execute(||{
-            //     sync_data(target, source, tp); //put thread pool again to transfer data from target to source
-            // })
-        }
-        Err(e) => {
-            println!("Copy from {} to {} err {}", source.peer_addr().unwrap(), target.peer_addr().unwrap(), e);
-            source.shutdown(Shutdown::Both);
-        }
+fn sync_data(source: &Arc<Mutex<TcpStream>>, target: &Arc<Mutex<TcpStream>>) -> bool {
+    let mut s_mutex = source.lock().unwrap();
+    let mut t_mutex = target.lock().unwrap();
+    let s = s_mutex.deref_mut();
+    let t = t_mutex.deref_mut();
+    copy_data(s, t) && copy_data(t, s)
+}
+
+fn copy_data(source: &mut TcpStream, target: &mut TcpStream) -> bool {
+    let mut buffer = [0; 8192];
+    // read from source
+    let result = source.read(&mut buffer);
+    if result.is_err() {
+        let err = result.as_ref().err();
+        return when_error(source, target, err);
     }
+    let count = result.unwrap();
+    // encounter end of tcp i.e. peer close it! see TcpStream.read() doc.
+    if count == 0 {
+        close_tun(source, target, Some(&Error::new(io::ErrorKind::BrokenPipe, "peer close the tunnel")));
+        return false;
+    }
+    // write to target
+    let result = target.write(&buffer[0..count]);
+    if result.is_err() {
+        let err = result.as_ref().err();
+        return when_error(source, target, err);
+    }
+    let src_addr = source.peer_addr().unwrap();
+    let target_addr = target.peer_addr().unwrap();
+    println!("Copy {} bytes from {} to {}", count, src_addr, target_addr);
+    true
+}
+
+fn when_error(source: &mut TcpStream, target: &mut TcpStream, err: Option<&Error>) -> bool {
+    if err.unwrap().kind() == io::ErrorKind::WouldBlock {
+        thread::sleep(Duration::from_millis(2));// make cpu to hava a rest
+        return true;
+    }
+    close_tun(source, target, err);
+    return false;
+}
+
+fn close_tun(source: &TcpStream, target: &TcpStream, err: Option<&Error>) {
+    let src_addr = source.peer_addr().unwrap();
+    let target_addr = target.peer_addr().unwrap();
+    println!("Copy from {} to {} error {:?}", src_addr, target_addr, err.unwrap());
+    source.shutdown(Shutdown::Both);
+    target.shutdown(Shutdown::Both);
 }
