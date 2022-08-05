@@ -30,7 +30,9 @@ fn listen_accept(local_addr: &'static str, remote_addr: &'static str, pool: &Thr
     // accept connections and process them, submit task to thread pool
     println!("Local port listening on {}", local_addr);
     for stream in listener.incoming() {
-        let stream = Arc::new(Mutex::new(stream.unwrap()));
+        let stream = stream.unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let stream = Arc::new(Mutex::new(stream));
         println!("Accept a connection from {}", stream.lock().unwrap().peer_addr().unwrap());
         let socket_tun = Arc::new(Mutex::new(SocketTun {
             target_addr: remote_addr,
@@ -88,6 +90,7 @@ fn establish_sync(mut socket_tun: Arc<Mutex<SocketTun>>) -> bool {
     let remote_addr = socket_tun.target_addr;
     match TcpStream::connect(remote_addr) {
         Ok(mut client_stream) => {
+            client_stream.set_nonblocking(true).unwrap();
             socket_tun.target.replace(Arc::new(Mutex::new(client_stream)));
             println!("Successfully connected to remote in {}", remote_addr);
             return true;
@@ -110,19 +113,27 @@ fn sync_data(source: &Arc<Mutex<TcpStream>>, target: &Arc<Mutex<TcpStream>>) -> 
 }
 
 fn copy_data(source: &mut TcpStream, target: &mut TcpStream) -> bool {
-    let mut buffer = [0; 8192];
+    let mut buffer = [0; 1024];
     // read from source
     let result = source.read(&mut buffer);
     if result.is_err() {
-        close_tun(source, target, result.as_ref().err());
+        let err = result.as_ref().err();
+        if err.unwrap().kind() == io::ErrorKind::WouldBlock {
+            return true;
+        }
+        close_tun(source, target, err);
         return false;
     }
     let count = result.unwrap();
     // write to target
     if count > 0 {
-        let result = target.write(&buffer[0..count + 1]);
+        let result = target.write(&buffer[0..count]);
         if result.is_err() {
-            close_tun(source, target, result.as_ref().err());
+            let err = result.as_ref().err();
+            if err.unwrap().kind() == io::ErrorKind::WouldBlock {
+                return true;
+            }
+            close_tun(source, target, err);
             return false;
         }
     }
@@ -135,7 +146,7 @@ fn copy_data(source: &mut TcpStream, target: &mut TcpStream) -> bool {
 fn close_tun(source: &TcpStream, target: &TcpStream, err: Option<&Error>) {
     let src_addr = source.peer_addr().unwrap();
     let target_addr = target.peer_addr().unwrap();
-    println!("Copy from {} to {} error {}", src_addr, target_addr, err.unwrap());
+    println!("Copy from {} to {} error {:?}", src_addr, target_addr, err.unwrap());
     source.shutdown(Shutdown::Both);
     target.shutdown(Shutdown::Both);
 }
