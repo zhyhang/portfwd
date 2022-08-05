@@ -84,7 +84,7 @@ fn establish_sync(mut socket_tun: Arc<Mutex<SocketTun>>) -> bool {
     let server_stream = socket_tun.source.as_ref().unwrap();
     if socket_tun.target.is_some() {
         let client_stream = socket_tun.target.as_ref().unwrap();
-        println!("Sync data from {} to {}", server_stream.lock().unwrap().peer_addr().unwrap(), client_stream.lock().unwrap().peer_addr().unwrap());
+        // println!("Sync data from {} to {}", server_stream.lock().unwrap().peer_addr().unwrap(), client_stream.lock().unwrap().peer_addr().unwrap());
         return sync_data(server_stream, client_stream);
     }
     let remote_addr = socket_tun.target_addr;
@@ -113,34 +113,38 @@ fn sync_data(source: &Arc<Mutex<TcpStream>>, target: &Arc<Mutex<TcpStream>>) -> 
 }
 
 fn copy_data(source: &mut TcpStream, target: &mut TcpStream) -> bool {
-    let mut buffer = [0; 1024];
+    let mut buffer = [0; 8192];
     // read from source
     let result = source.read(&mut buffer);
     if result.is_err() {
         let err = result.as_ref().err();
-        if err.unwrap().kind() == io::ErrorKind::WouldBlock {
-            return true;
-        }
-        close_tun(source, target, err);
-        return false;
+        return when_error(source, target, err);
     }
     let count = result.unwrap();
+    // encounter end of tcp i.e. peer close it! see TcpStream.read() doc.
+    if count == 0 {
+        close_tun(source, target, Some(&Error::new(io::ErrorKind::BrokenPipe, "peer close the tunnel")));
+        return false;
+    }
     // write to target
-    if count > 0 {
-        let result = target.write(&buffer[0..count]);
-        if result.is_err() {
-            let err = result.as_ref().err();
-            if err.unwrap().kind() == io::ErrorKind::WouldBlock {
-                return true;
-            }
-            close_tun(source, target, err);
-            return false;
-        }
+    let result = target.write(&buffer[0..count]);
+    if result.is_err() {
+        let err = result.as_ref().err();
+        return when_error(source, target, err);
     }
     let src_addr = source.peer_addr().unwrap();
     let target_addr = target.peer_addr().unwrap();
     println!("Copy {} bytes from {} to {}", count, src_addr, target_addr);
     true
+}
+
+fn when_error(source: &mut TcpStream, target: &mut TcpStream, err: Option<&Error>) -> bool {
+    if err.unwrap().kind() == io::ErrorKind::WouldBlock {
+        thread::sleep(Duration::from_millis(2));// make cpu to hava a rest
+        return true;
+    }
+    close_tun(source, target, err);
+    return false;
 }
 
 fn close_tun(source: &TcpStream, target: &TcpStream, err: Option<&Error>) {

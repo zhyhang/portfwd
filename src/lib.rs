@@ -84,7 +84,7 @@ impl Worker {
 
             match message {
                 Message::NewJob(job) => {
-                    println!("Worker {} got a job; executing.", id);
+                    // println!("Worker {} got a job; executing.", id);
 
                     if job() {
                         sender.lock().unwrap().send(Message::NewJob(job));
