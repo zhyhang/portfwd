@@ -1,119 +1,114 @@
+mod nio;
+
 use std::{fs, io, thread};
+use std::collections::HashMap;
 use std::io::{Error, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::Shutdown;
 use std::ops::DerefMut;
 use std::rc::Rc;
 use std::str::from_utf8;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use mio::{Events, Poll, Token};
+use mio::{Events, Interest, Poll, Token};
+use mio::net::{TcpListener, TcpStream};
 
 use portfwd::ThreadPool;
-
-// Some tokens to allow us to identify which event is for which socket.
-const SERVER: Token = Token(0);
-const CLIENT: Token = Token(1);
+use crate::nio::{connect, listen, SocketTun};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local_addr = "0.0.0.0:8379";
     let remote_addr = "127.0.0.1:6379";
     let pool = ThreadPool::new(6);
     // Create a poll instance.
-    let mut poll = Poll::new()?;
+    let poller = Arc::new(Mutex::new(Poll::new()?));
     // Create storage for events.
     let mut events = Events::with_capacity(1024);
-    listen_accept(&local_addr, remote_addr, &pool);
+    // listen_accept(local_addr, remote_addr, &pool);
+    let mut tcp_server_map = HashMap::new();
+    let tcp_server = listen(poller.clone(), local_addr)?;
+    tcp_server_map.insert(tcp_server.token, tcp_server);
+    let mut socket_tun_map = Arc::new(Mutex::new(HashMap::new()));
+    loop {
+        // Poll Mio for events, blocking until we get an event.
+        poller.clone().lock().unwrap().poll(&mut events, None)?;
+
+        // Process each event.
+        for event in events.iter() {
+            let token = event.token();
+            let poller = poller.clone();
+            let socket_tun_map = socket_tun_map.clone();
+            if let Some(srv) = tcp_server_map.get(&token) {
+                let (token, stream) = srv.accept(poller.clone())?;
+                let mut tun = SocketTun {
+                    target_addr: remote_addr,
+                    source_token: Some(token),
+                    target_token: None,
+                    source: Some(Arc::new(Mutex::new(stream))),
+                    target: None,
+                };
+                let tun_arc = Arc::new(Mutex::new(tun));
+                socket_tun_map.lock().unwrap().insert(token, tun_arc.clone());
+                pool.execute(move || {
+                    connect(poller.clone(), socket_tun_map.clone(), tun_arc.clone());
+                    false
+                });
+            } else if let Some(tunnel) = socket_tun_map.lock().unwrap().get(&token) {}
+        }
+    }
     println!("Shutting down.");
     Ok(())
 }
 
-#[derive(Clone, Debug)]
-struct SocketTun {
-    target_addr: &'static str,
-    source: Option<Arc<Mutex<TcpStream>>>,
-    target: Option<Arc<Mutex<TcpStream>>>,
-}
-
 
 fn listen_accept(local_addr: &'static str, remote_addr: &'static str, pool: &ThreadPool) -> Result<(), Box<dyn std::error::Error>> {
-    let listener = TcpListener::bind(local_addr).unwrap();
-    // accept connections and process them, submit task to thread pool
-    println!("Local port listening on {}", local_addr);
-    for stream in listener.incoming() {
-        let stream = stream?;
-        stream.set_nonblocking(true)?;
-        let stream = Arc::new(Mutex::new(stream));
-        println!("Accept a connection from {}", stream.lock().unwrap().peer_addr().unwrap());
-        let socket_tun = Arc::new(Mutex::new(SocketTun {
-            target_addr: remote_addr,
-            source: Some(stream),
-            target: None,
-        }));
-        pool.execute(move || {
-            establish_sync(socket_tun.clone())
-        });
-    }
-    // close the socket server
-    drop(listener);
+    // let listener = TcpListener::bind(local_addr.parse()?)?;
+    // // accept connections and process them, submit task to thread pool
+    // println!("Local port listening on {}", local_addr);
+    // for stream in listener.incoming() {
+    //     let stream = stream?;
+    //     stream.set_nonblocking(true)?;
+    //     let stream = Arc::new(Mutex::new(stream));
+    //     println!("Accept a connection from {}", stream.lock().unwrap().peer_addr().unwrap());
+    //     let socket_tun = Arc::new(Mutex::new(SocketTun {
+    //         target_addr: remote_addr,
+    //         source: Some(stream),
+    //         target: None,
+    //     }));
+    //     pool.execute(move || {
+    //         establish_sync(socket_tun.clone())
+    //     });
+    // }
+    // // close the socket server
+    // drop(listener);
 
     Ok(())
 }
 
-fn handle_connection(mut stream: TcpStream) -> bool {
-    let mut buffer = [0; 1024];
-    stream.read(&mut buffer).unwrap();
-
-    let get = b"GET / HTTP/1.1\r\n";
-    let sleep = b"GET /sleep HTTP/1.1\r\n";
-
-    let (status_line, filename) = if buffer.starts_with(get) {
-        ("HTTP/1.1 200 OK", "hello.html")
-    } else if buffer.starts_with(sleep) {
-        thread::sleep(Duration::from_secs(5));
-        ("HTTP/1.1 200 OK", "hello.html")
-    } else {
-        ("HTTP/1.1 404 NOT FOUND", "404.html")
-    };
-
-    let contents = fs::read_to_string(filename).unwrap();
-
-    let response = format!(
-        "{}\r\nContent-Length: {}\r\n\r\n{}",
-        status_line,
-        contents.len(),
-        contents
-    );
-
-    stream.write(response.as_bytes()).unwrap();
-    stream.flush().unwrap();
-    true
-}
-
-
 /// establish remote connect then synchronize data between source and target
 fn establish_sync(mut socket_tun: Arc<Mutex<SocketTun>>) -> bool {
-    let mut socket_tun = socket_tun.lock().unwrap();
-    let server_stream = socket_tun.source.as_ref().unwrap();
-    if socket_tun.target.is_some() {
-        let client_stream = socket_tun.target.as_ref().unwrap();
-        // println!("Sync data from {} to {}", server_stream.lock().unwrap().peer_addr().unwrap(), client_stream.lock().unwrap().peer_addr().unwrap());
-        return sync_data(server_stream, client_stream);
-    }
-    let remote_addr = socket_tun.target_addr;
-    match TcpStream::connect(remote_addr) {
-        Ok(mut client_stream) => {
-            client_stream.set_nonblocking(true).unwrap();
-            socket_tun.target.replace(Arc::new(Mutex::new(client_stream)));
-            println!("Successfully connected to remote in {}", remote_addr);
-            return true;
-        }
-        Err(e) => {
-            let server_stream_mutex = server_stream.lock().unwrap();
-            println!("Failed to connect remote: {}, close client connection: {}, {}", remote_addr, server_stream_mutex.peer_addr().unwrap(), e);
-            server_stream_mutex.shutdown(Shutdown::Both);// shutdown stream from outer client
-            return false;
-        }
-    }
+    // let mut socket_tun = socket_tun.lock().unwrap();
+    // let server_stream = socket_tun.source.as_ref().unwrap();
+    // if socket_tun.target.is_some() {
+    //     let client_stream = socket_tun.target.as_ref().unwrap();
+    //     // println!("Sync data from {} to {}", server_stream.lock().unwrap().peer_addr().unwrap(), client_stream.lock().unwrap().peer_addr().unwrap());
+    //     return sync_data(server_stream, client_stream);
+    // }
+    // let remote_addr = socket_tun.target_addr;
+    // match TcpStream::connect(remote_addr.parse().unwrap()) {
+    //     Ok(mut client_stream) => {
+    //         client_stream.set_nonblocking(true).unwrap();
+    //         socket_tun.target.replace(Arc::new(Mutex::new(client_stream)));
+    //         println!("Successfully connected to remote in {}", remote_addr);
+    //         return true;
+    //     }
+    //     Err(e) => {
+    //         let server_stream_mutex = server_stream.lock().unwrap();
+    //         println!("Failed to connect remote: {}, close client connection: {}, {}", remote_addr, server_stream_mutex.peer_addr().unwrap(), e);
+    //         server_stream_mutex.shutdown(Shutdown::Both);// shutdown stream from outer client
+    //         return false;
+    //     }
+    // }
+    false
 }
 
 fn sync_data(source: &Arc<Mutex<TcpStream>>, target: &Arc<Mutex<TcpStream>>) -> bool {
