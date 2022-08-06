@@ -6,15 +6,25 @@ use std::rc::Rc;
 use std::str::from_utf8;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use mio::{Events, Poll, Token};
 
 use portfwd::ThreadPool;
 
-fn main() {
+// Some tokens to allow us to identify which event is for which socket.
+const SERVER: Token = Token(0);
+const CLIENT: Token = Token(1);
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local_addr = "0.0.0.0:8379";
     let remote_addr = "127.0.0.1:6379";
     let pool = ThreadPool::new(6);
+    // Create a poll instance.
+    let mut poll = Poll::new()?;
+    // Create storage for events.
+    let mut events = Events::with_capacity(1024);
     listen_accept(&local_addr, remote_addr, &pool);
     println!("Shutting down.");
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -25,13 +35,13 @@ struct SocketTun {
 }
 
 
-fn listen_accept(local_addr: &'static str, remote_addr: &'static str, pool: &ThreadPool) {
+fn listen_accept(local_addr: &'static str, remote_addr: &'static str, pool: &ThreadPool) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(local_addr).unwrap();
     // accept connections and process them, submit task to thread pool
     println!("Local port listening on {}", local_addr);
     for stream in listener.incoming() {
-        let stream = stream.unwrap();
-        stream.set_nonblocking(true).unwrap();
+        let stream = stream?;
+        stream.set_nonblocking(true)?;
         let stream = Arc::new(Mutex::new(stream));
         println!("Accept a connection from {}", stream.lock().unwrap().peer_addr().unwrap());
         let socket_tun = Arc::new(Mutex::new(SocketTun {
@@ -45,6 +55,8 @@ fn listen_accept(local_addr: &'static str, remote_addr: &'static str, pool: &Thr
     }
     // close the socket server
     drop(listener);
+
+    Ok(())
 }
 
 fn handle_connection(mut stream: TcpStream) -> bool {
