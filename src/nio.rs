@@ -14,11 +14,8 @@ static TOKEN_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Debug)]
 pub struct SocketTun {
-    pub target_addr: &'static str,
-    pub source_token: Option<Token>,
-    pub target_token: Option<Token>,
-    pub source: Option<Arc<Mutex<TcpStream>>>,
-    pub target: Option<Arc<Mutex<TcpStream>>>,
+    pub source:  Arc<Mutex<TcpStream>>,
+    pub target:  Arc<Mutex<TcpStream>>,
 }
 
 #[derive(Debug)]
@@ -29,11 +26,9 @@ pub struct TcpServer {
 }
 
 impl TcpServer {
-    pub fn accept(&self, poller: Arc<Mutex<Poll>>) -> Result<(Token, TcpStream), Box<dyn Error>> {
-        let (mut stream, _) = self.listener.accept()?;
-        let token = create_token();
-        poller.lock().unwrap().registry().register(&mut stream, token, Interest::READABLE | Interest::WRITABLE)?;
-        Ok((token, stream))
+    pub fn accept(&self) -> Result<TcpStream, Box<dyn Error>> {
+        let (stream, _) = self.listener.accept()?;
+        Ok((stream))
     }
 }
 
@@ -61,26 +56,44 @@ pub fn listen(poller: Arc<Mutex<Poll>>, local_addr: &'static str) -> Result<TcpS
     Ok(TcpServer { addr, listener, token })
 }
 
-pub fn connect(poller: Arc<Mutex<Poll>>, socket_tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>, socket_tun: Arc<Mutex<SocketTun>>) -> Result<(), Box<dyn Error>> {
-    let mut socket_tun=socket_tun.lock().unwrap();
-    let remote_addr = socket_tun.target_addr;
+pub fn connect(poller: Arc<Mutex<Poll>>, socket_tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>,
+               stream_srv: Arc<Mutex<TcpStream>>, remote_addr: &str) -> Result<(), Box<dyn Error>> {
     match TcpStream::connect(remote_addr.parse()?) {
-        Ok(mut client_stream) => {
-            let token = create_token();
-            poller.lock().unwrap().registry().register(&mut client_stream, token, Interest::READABLE | Interest::WRITABLE)?;
-            socket_tun.target.replace(Arc::new(Mutex::new(client_stream)));
+        Ok(mut stream_cli) => {
+            let (token_srv,token_cli)=register_tun(poller.lock().as_ref().unwrap(),
+                                                   stream_srv.lock().as_deref_mut().unwrap(),
+                                                   &mut stream_cli)?;
+            cache_tun(socket_tun_map, token_srv, stream_srv, token_cli,
+                      Arc::new(Mutex::new(stream_cli)));
             println!("Successfully connected to remote in {}", remote_addr);
             return Ok(());
         }
         Err(e) => {
-            let server_stream_mutex = socket_tun.source.as_ref().unwrap().lock().unwrap();
-            println!("Failed to connect remote: {}, close client connection: {}, {}", remote_addr, server_stream_mutex.peer_addr().unwrap(), e);
-            socket_tun_map.lock().unwrap().remove(socket_tun.source_token.as_ref().unwrap());
-            poller.lock().unwrap().registry().deregister(socket_tun.source.as_ref().unwrap().lock().unwrap().deref_mut())?;
-            server_stream_mutex.shutdown(Shutdown::Both);// shutdown stream from outer client
-            return Err(Box::<dyn error::Error>::from(e));
+            let stream_connected = stream_srv.lock().unwrap();
+            println!("Failed to connect remote: {}, close client connection: {}, {}",
+                     remote_addr, stream_connected.peer_addr().unwrap(), e);
+            stream_connected.shutdown(Shutdown::Both);// shutdown stream from outer client
+            return Err(Box::<dyn Error>::from(e));
         }
     }
+
+}
+
+fn register_tun(poller:&Poll,stream_srv:&mut TcpStream,stream_cli:&mut TcpStream)-> Result<(Token,Token), Box<dyn Error>> {
+    let token_srv = create_token();
+    let token_client = create_token();
+    poller.registry().register(stream_srv, token_srv, Interest::READABLE | Interest::WRITABLE)?;
+    poller.registry().register(stream_cli, token_client, Interest::READABLE | Interest::WRITABLE)?;
+    Ok((token_srv,token_client))
+}
+
+fn cache_tun(tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>, token_srv: Token,
+             stream_srv: Arc<Mutex<TcpStream>>, token_cli: Token, stream_cli: Arc<Mutex<TcpStream>>) {
+    let mut map = tun_map.lock().unwrap();
+    let tun_srv = SocketTun { source: stream_srv.clone(), target: stream_cli.clone() };
+    let tun_cli = SocketTun { source: stream_cli.clone(), target: stream_srv.clone() };
+    map.insert(token_srv, Arc::new(Mutex::new(tun_srv)));
+    map.insert(token_cli, Arc::new(Mutex::new(tun_cli)));
 
 }
 

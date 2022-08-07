@@ -38,18 +38,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let poller = poller.clone();
             let socket_tun_map = socket_tun_map.clone();
             if let Some(srv) = tcp_server_map.get(&token) {
-                let (token, stream) = srv.accept(poller.clone())?;
-                let mut tun = SocketTun {
-                    target_addr: remote_addr,
-                    source_token: Some(token),
-                    target_token: None,
-                    source: Some(Arc::new(Mutex::new(stream))),
-                    target: None,
-                };
-                let tun_arc = Arc::new(Mutex::new(tun));
-                socket_tun_map.lock().unwrap().insert(token, tun_arc.clone());
+                let  stream= srv.accept()?;
+                let stream_srv = Arc::new(Mutex::new(stream));
                 pool.execute(move || {
-                    connect(poller.clone(), socket_tun_map.clone(), tun_arc.clone());
+                    connect(poller.clone(), socket_tun_map.clone(),
+                            stream_srv.clone(), remote_addr);
                     false
                 });
             } else if let Some(tunnel) = socket_tun_map.lock().unwrap().get(&token) {}
