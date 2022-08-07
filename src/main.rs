@@ -2,7 +2,7 @@ mod nio;
 
 use std::{fs, io, thread};
 use std::collections::HashMap;
-use std::io::{Error, Read, Write};
+use std::io::{Error, ErrorKind, Read, Write};
 use std::net::Shutdown;
 use std::ops::DerefMut;
 use std::rc::Rc;
@@ -38,18 +38,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let poller = poller.clone();
             let socket_tun_map = socket_tun_map.clone();
             if let Some(srv) = tcp_server_map.get(&token) {
-                let  stream= srv.accept()?;
+                let stream = srv.accept()?;
                 let stream_srv = Arc::new(Mutex::new(stream));
                 pool.execute(move || {
                     connect(poller.clone(), socket_tun_map.clone(),
                             stream_srv.clone(), remote_addr);
                     false
                 });
-            } else if let Some(tunnel) = socket_tun_map.lock().unwrap().get(&token) {}
+            } else if let Some(tunnel) = socket_tun_map.lock().unwrap().get(&token) {
+
+            } else {
+                println!("Cannot found the poll token in socket tunnel map, exit! ");
+                return Err(Box::new(Error::new(ErrorKind::NotFound, "Poll token not in tunnel map")));
+            }
         }
     }
-    println!("Shutting down.");
-    Ok(())
 }
 
 

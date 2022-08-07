@@ -14,6 +14,8 @@ static TOKEN_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Debug)]
 pub struct SocketTun {
+    pub source_token: Token,
+    pub target_token: Token,
     pub source:  Arc<Mutex<TcpStream>>,
     pub target:  Arc<Mutex<TcpStream>>,
 }
@@ -76,6 +78,11 @@ pub fn connect(poller: Arc<Mutex<Poll>>, socket_tun_map: Arc<Mutex<HashMap<Token
             return Err(Box::<dyn Error>::from(e));
         }
     }
+}
+
+pub fn sync_data(poller: Arc<Mutex<Poll>>, socket_tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>,
+                 tun: Arc<Mutex<SocketTun>>) {
+
 
 }
 
@@ -90,8 +97,8 @@ fn register_tun(poller:&Poll,stream_srv:&mut TcpStream,stream_cli:&mut TcpStream
 fn cache_tun(tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>, token_srv: Token,
              stream_srv: Arc<Mutex<TcpStream>>, token_cli: Token, stream_cli: Arc<Mutex<TcpStream>>) {
     let mut map = tun_map.lock().unwrap();
-    let tun_srv = SocketTun { source: stream_srv.clone(), target: stream_cli.clone() };
-    let tun_cli = SocketTun { source: stream_cli.clone(), target: stream_srv.clone() };
+    let tun_srv = SocketTun { source_token: token_srv,target_token:token_cli,source: stream_srv.clone(), target: stream_cli.clone() };
+    let tun_cli = SocketTun { source_token: token_cli,target_token:token_srv,source: stream_cli.clone(), target: stream_srv.clone() };
     map.insert(token_srv, Arc::new(Mutex::new(tun_srv)));
     map.insert(token_cli, Arc::new(Mutex::new(tun_cli)));
 
