@@ -24,30 +24,32 @@ pub struct SocketTun {
 }
 
 #[derive(Debug)]
-pub struct TcpServer {
-    pub addr: SocketAddr,
+pub struct ForwardServer {
+    pub local_addr: SocketAddr,
+    pub remote_addr: SocketAddr,
     pub listener: TcpListener,
     pub token: Token,
 }
 
-impl TcpServer {
+impl ForwardServer {
     pub fn accept(&self) -> Result<TcpStream, std::io::Error> {
         let (stream, _) = self.listener.accept()?;
         Ok(stream)
     }
 }
 
-pub fn listen(poller: Arc<Mutex<Poll>>, local_addr: &'static str) -> Result<TcpServer, Box<dyn Error>> {
-    let addr = local_addr.parse()?;
-    let mut listener = TcpListener::bind(addr)?;
+pub fn listen(poller: Arc<Mutex<Poll>>, local_addr: &'static str, remote_addr: &'static str) -> Result<ForwardServer, Box<dyn Error>> {
+    let local_addr = local_addr.parse()?;
+    let remote_addr=remote_addr.parse()?;
+    let mut listener = TcpListener::bind(local_addr)?;
     let token = create_token();
     poller.lock().unwrap().registry().register(&mut listener, token, Interest::READABLE)?;
-    Ok(TcpServer { addr, listener, token })
+    Ok(ForwardServer { local_addr, remote_addr,listener, token })
 }
 
 pub fn connect(poller: Arc<Mutex<Poll>>, socket_tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>,
-               stream_srv: Arc<Mutex<TcpStream>>, remote_addr: &str) -> Result<(), Box<dyn Error>> {
-    match TcpStream::connect(remote_addr.parse()?) {
+               stream_srv: Arc<Mutex<TcpStream>>, remote_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
+    match TcpStream::connect(remote_addr) {
         Ok(mut stream_cli) => {
             let (token_srv, token_cli) = register_tun(poller.lock().as_ref().unwrap(),
                                                       stream_srv.lock().as_deref_mut().unwrap(),
