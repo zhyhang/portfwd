@@ -91,7 +91,9 @@ fn create_token() -> Token {
 }
 
 pub fn sync_data(poller: Arc<Mutex<Poll>>, tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>,
-                 tun: Arc<Mutex<SocketTun>>) {
+                 token: &Token) {
+    let tun_map_locked =tun_map.lock().unwrap();
+    let tun = tun_map_locked.get(token).unwrap();
     let mut buffer = [0; 4096];
     let mut count = 0;
     loop {
