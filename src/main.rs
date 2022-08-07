@@ -58,7 +58,7 @@ fn event_loop(poller: Arc<Mutex<Poll>>,
         for event in events.iter() {
             let token = event.token();
             let poller = poller.clone();
-            if let Some(srv)= server_map.clone().lock().unwrap().get(&token) {
+            if let Some(srv)= server_map.lock().unwrap().get(&token) {
                 match srv.accept() {
                     Ok(stream) => {
                         let stream_srv = Arc::new(Mutex::new(stream));

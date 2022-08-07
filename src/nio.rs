@@ -178,7 +178,7 @@ fn deregister_tun(poller: Arc<Mutex<Poll>>, source: &mut TcpStream, target: &mut
 fn close_tun_print_err(source: &mut TcpStream, target: &mut TcpStream, e: &std::io::Error) {
     let src_addr = source.peer_addr().unwrap();
     let target_addr = target.peer_addr().unwrap();
-    println!("Copy from {} to {} error {:?}", src_addr, target_addr, e);
+    println!("Copy from {} to {} error {}", src_addr, target_addr, e);
     source.shutdown(Shutdown::Both);
     target.shutdown(Shutdown::Both);
 }
