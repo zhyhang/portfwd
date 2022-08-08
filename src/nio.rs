@@ -40,11 +40,11 @@ impl ForwardServer {
 
 pub fn listen(poller: Arc<Mutex<Poll>>, local_addr: &'static str, remote_addr: &'static str) -> Result<ForwardServer, Box<dyn Error>> {
     let local_addr = local_addr.parse()?;
-    let remote_addr=remote_addr.parse()?;
+    let remote_addr = remote_addr.parse()?;
     let mut listener = TcpListener::bind(local_addr)?;
     let token = create_token();
     poller.lock().unwrap().registry().register(&mut listener, token, Interest::READABLE)?;
-    Ok(ForwardServer { local_addr, remote_addr,listener, token })
+    Ok(ForwardServer { local_addr, remote_addr, listener, token })
 }
 
 pub fn connect(poller: Arc<Mutex<Poll>>, socket_tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>,
@@ -91,14 +91,12 @@ fn create_token() -> Token {
 }
 
 pub fn sync_data(poller: Arc<Mutex<Poll>>, tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>,
-                 token: &Token) {
-    let tun_map_locked =tun_map.lock().unwrap();
-    let tun = tun_map_locked.get(token).unwrap();
+                 tun: Arc<Mutex<SocketTun>>) {
     let mut buffer = [0; 4096];
     let mut count = 0;
     loop {
         // read from source
-        let result = tun.lock().unwrap().source.lock().as_mut().unwrap().read(&mut buffer);
+        let result = tun.lock().unwrap().source.lock().unwrap().read(&mut buffer);
         let result = result.as_ref();
         if result.is_err() && is_would_block(result.err().unwrap()) {
             break;
