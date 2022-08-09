@@ -107,12 +107,14 @@ pub fn sync_data(poller: Arc<Mutex<Poll>>, tun_map: Arc<Mutex<HashMap<Token, Arc
         } else if *result.unwrap() == 0 {
             let e = &create_broken_err(tun.lock().unwrap().source.lock().as_ref().unwrap());
             when_error(poller.clone(), tun_map.clone(), tun.clone(), e);
+            return;
         }
         let this_count = *result.unwrap();
         let result_write = write_target(tun.lock().unwrap().target.lock().as_mut().unwrap(), &buffer, this_count);
         if result_write.is_err() {
             when_error(poller.clone(), tun_map.clone(), tun.clone(),
                        result_write.err().as_ref().unwrap());
+            return;
         }
         count += this_count;
     }
