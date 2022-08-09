@@ -64,10 +64,10 @@ fn event_loop(poller: Arc<Mutex<Poll>>,
                         let stream_srv = Arc::new(Mutex::new(stream));
                         let tun_map_clone = tun_map.clone();
                         let remote_addr = srv.remote_addr;
-                        pool.execute(move || {
-                            connect(poller.clone(), tun_map_clone.clone(), stream_srv.clone(), remote_addr);
-                            false
-                        });
+                        // pool.execute(move || {
+                        connect(poller.clone(), tun_map_clone.clone(), stream_srv.clone(), remote_addr);
+                        //     false
+                        // });
                     }
                     Err(e) if e.kind() == ErrorKind::WouldBlock => break,
                     Err(e) => {
@@ -75,18 +75,25 @@ fn event_loop(poller: Arc<Mutex<Poll>>,
                     }
                 }
             } else if let Some(tun) = tun_map.lock().unwrap().get(&token) {
-                let tun_map_clone = tun_map.clone();
-                let tun=tun.clone();
-                pool.execute(move || {
-                    sync_data(poller.clone(), tun_map_clone.clone(), tun.clone());
-                    false
-                });
+                if(event.is_readable()) {//TODO read Poll document and handle reade_close...
+                    commit_sync_data(poller, pool, tun_map.clone(), tun);
+                }
             } else {
                 println!("Cannot found the poll token in socket tunnel map, exit! ");
                 return Err(Box::new(Error::new(ErrorKind::NotFound, "Poll token not in tunnel map")));
             }
         }
     }
+}
+
+fn commit_sync_data(poller: Arc<Mutex<Poll>>, pool: &ThreadPool,
+                    tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>, tun: &Arc<Mutex<SocketTun>>) {
+    let tun_map_clone = tun_map.clone();
+    let tun = tun.clone();
+    pool.execute(move || {
+        sync_data(poller.clone(), tun_map_clone.clone(), tun.clone());
+        false
+    });
 }
 
 
