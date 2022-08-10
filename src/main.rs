@@ -53,7 +53,7 @@ fn event_loop(poller: Arc<Mutex<Poll>>,
               pool: &ThreadPool) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         // Poll Mio for events, blocking until we get an event.
-        poller.lock().unwrap().poll(events, None)?;
+        poller.lock().unwrap().poll(events, Some(Duration::from_millis(1)))?;
         // Process each event.
         for event in events.iter() {
             let token = event.token();
@@ -67,7 +67,7 @@ fn event_loop(poller: Arc<Mutex<Poll>>,
                             let tun_map_clone = tun_map.clone();
                             let remote_addr = srv.remote_addr;
                             pool.execute(move || {
-                            connect(poller.clone(), tun_map_clone.clone(), stream_srv.clone(), remote_addr);
+                                connect(poller.clone(), tun_map_clone.clone(), stream_srv.clone(), remote_addr);
                                 false
                             });
                         }
@@ -79,7 +79,7 @@ fn event_loop(poller: Arc<Mutex<Poll>>,
                     }
                 }
             } else if let Some(tun) = tun_map.lock().unwrap().get(&token) {
-                if(event.is_readable()) {//TODO read Poll document and handle reade_close...
+                if (event.is_readable()) {//TODO read Poll document and handle reade_close...
                     commit_sync_data(poller, pool, tun_map.clone(), tun);
                 }
             } else {
