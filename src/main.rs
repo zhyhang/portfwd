@@ -53,25 +53,29 @@ fn event_loop(poller: Arc<Mutex<Poll>>,
               pool: &ThreadPool) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         // Poll Mio for events, blocking until we get an event.
-        poller.clone().lock().unwrap().poll(events, None)?;
+        poller.lock().unwrap().poll(events, None)?;
         // Process each event.
         for event in events.iter() {
             let token = event.token();
             let poller = poller.clone();
             if let Some(srv) = server_map.get(&token) {
-                match srv.accept() {
-                    Ok(stream) => {
-                        let stream_srv = Arc::new(Mutex::new(stream));
-                        let tun_map_clone = tun_map.clone();
-                        let remote_addr = srv.remote_addr;
-                        // pool.execute(move || {
-                        connect(poller.clone(), tun_map_clone.clone(), stream_srv.clone(), remote_addr);
-                        //     false
-                        // });
-                    }
-                    Err(e) if e.kind() == ErrorKind::WouldBlock => break,
-                    Err(e) => {
-                        println!("Tcp server accept connection error {}, continue next event handle.", e);
+                loop {
+                    let poller = poller.clone();
+                    match srv.accept() {
+                        Ok(stream) => {
+                            let stream_srv = Arc::new(Mutex::new(stream));
+                            let tun_map_clone = tun_map.clone();
+                            let remote_addr = srv.remote_addr;
+                            pool.execute(move || {
+                            connect(poller.clone(), tun_map_clone.clone(), stream_srv.clone(), remote_addr);
+                                false
+                            });
+                        }
+                        Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                        Err(e) => {
+                            println!("Tcp server accept connection error {}, continue next event handle.", e);
+                            return Err(Box::new(Error::new(ErrorKind::BrokenPipe, "accept connect error")));
+                        }
                     }
                 }
             } else if let Some(tun) = tun_map.lock().unwrap().get(&token) {
