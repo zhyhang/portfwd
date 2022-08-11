@@ -157,25 +157,35 @@ fn is_would_block(e: &std::io::Error) -> bool {
 fn when_error(poller: Arc<Mutex<Poll>>, tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>,
               tun: Arc<Mutex<SocketTun>>, e: &std::io::Error) {
     remove_tun_from_cache(tun_map, tun.clone());
-    deregister_tun(poller, tun.lock().unwrap().source.lock().as_mut().unwrap(),
-                   tun.lock().unwrap().target.lock().as_mut().unwrap());
-    close_tun_print_err(tun.lock().unwrap().source.lock().as_mut().unwrap(),
-                        tun.lock().unwrap().target.lock().as_mut().unwrap(), e);
+    deregister_tun(poller, tun.clone());
+    close_tun_print_err(tun.clone(), e);
 }
 
 
 fn remove_tun_from_cache(tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>, tun_any: Arc<Mutex<SocketTun>>) {
+    println!("remove tun map...");
     tun_map.lock().unwrap().remove(&(tun_any.lock().unwrap().source_token));
+    println!("removed tun map1");
     tun_map.lock().unwrap().remove(&(tun_any.lock().unwrap().target_token));
+    println!("removed tun map2");
 }
 
-fn deregister_tun(poller: Arc<Mutex<Poll>>, source: &mut TcpStream, target: &mut TcpStream) {
+fn deregister_tun(poller: Arc<Mutex<Poll>>, tun: Arc<Mutex<SocketTun>>) {
+    println!("deregister_lock...");
     let poller_locked = poller.lock().unwrap();
-    poller_locked.registry().deregister(source);
-    poller_locked.registry().deregister(target);
+    let tun_unwrap = tun.lock().unwrap();
+    let mut source = tun_unwrap.source.lock().unwrap();
+    poller_locked.registry().deregister(source.deref_mut());
+    println!("deregister_locked1");
+    let mut target = tun_unwrap.target.lock().unwrap();
+    poller_locked.registry().deregister(target.deref_mut());
+    println!("deregister_locked2");
 }
 
-fn close_tun_print_err(source: &mut TcpStream, target: &mut TcpStream, e: &std::io::Error) {
+fn close_tun_print_err(tun: Arc<Mutex<SocketTun>>, e: &std::io::Error) {
+    let tun_unwrap = tun.lock().unwrap();
+    let source = tun_unwrap.source.lock().unwrap();
+    let target = tun_unwrap.target.lock().unwrap();
     let src_addr = source.peer_addr().unwrap();
     let target_addr = target.peer_addr().unwrap();
     println!("Copy from {} to {} error {}", src_addr, target_addr, e);

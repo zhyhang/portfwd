@@ -53,7 +53,7 @@ fn event_loop(poller: Arc<Mutex<Poll>>,
               pool: &ThreadPool) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         // Poll Mio for events, blocking until we get an event.
-        poller.lock().unwrap().poll(events, Some(Duration::from_millis(1)))?;
+        poller.lock().unwrap().poll(events, Some(Duration::from_millis(2)))?;
         // Process each event.
         for event in events.iter() {
             let token = event.token();
