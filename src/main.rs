@@ -84,7 +84,7 @@ fn event_loop(poller: Arc<Mutex<Poll>>,
                 }
             } else {
                 println!("Cannot found the poll token in socket tunnel map, exit! ");
-                return Err(Box::new(Error::new(ErrorKind::NotFound, "Poll token not in tunnel map")));
+                // return Err(Box::new(Error::new(ErrorKind::NotFound, "Poll token not in tunnel map")));
             }
         }
     }

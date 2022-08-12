@@ -157,8 +157,11 @@ fn is_would_block(e: &std::io::Error) -> bool {
 fn when_error(poller: Arc<Mutex<Poll>>, tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>,
               tun: Arc<Mutex<SocketTun>>, e: &std::io::Error) {
     remove_tun_from_cache(tun_map, tun.clone());
-    deregister_tun(poller, tun.clone());
-    close_tun_print_err(tun.clone(), e);
+    let tun_unwrap = tun.lock().unwrap();
+    let mut source = tun_unwrap.source.lock().unwrap();
+    let mut target = tun_unwrap.target.lock().unwrap();
+    deregister_tun(poller, source.deref_mut(), target.deref_mut());
+    close_tun_print_err(source.deref(), target.deref(), e);
 }
 
 
@@ -170,22 +173,16 @@ fn remove_tun_from_cache(tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>
     println!("removed tun map2");
 }
 
-fn deregister_tun(poller: Arc<Mutex<Poll>>, tun: Arc<Mutex<SocketTun>>) {
+fn deregister_tun(poller: Arc<Mutex<Poll>>, source: &mut TcpStream, target:&mut TcpStream) {
     println!("deregister_lock...");
     let poller_locked = poller.lock().unwrap();
-    let tun_unwrap = tun.lock().unwrap();
-    let mut source = tun_unwrap.source.lock().unwrap();
-    poller_locked.registry().deregister(source.deref_mut());
+    poller_locked.registry().deregister(source);
     println!("deregister_locked1");
-    let mut target = tun_unwrap.target.lock().unwrap();
-    poller_locked.registry().deregister(target.deref_mut());
+    poller_locked.registry().deregister(target);
     println!("deregister_locked2");
 }
 
-fn close_tun_print_err(tun: Arc<Mutex<SocketTun>>, e: &std::io::Error) {
-    let tun_unwrap = tun.lock().unwrap();
-    let source = tun_unwrap.source.lock().unwrap();
-    let target = tun_unwrap.target.lock().unwrap();
+fn close_tun_print_err(source: & TcpStream, target:& TcpStream, e: &std::io::Error) {
     let src_addr = source.peer_addr().unwrap();
     let target_addr = target.peer_addr().unwrap();
     println!("Copy from {} to {} error {}", src_addr, target_addr, e);
