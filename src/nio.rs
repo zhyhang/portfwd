@@ -72,8 +72,8 @@ pub fn connect(poller: Arc<Mutex<Poll>>, socket_tun_map: Arc<Mutex<HashMap<Token
 fn register_tun(poller: &Poll, stream_srv: &mut TcpStream, stream_cli: &mut TcpStream) -> Result<(Token, Token), Box<dyn Error>> {
     let token_srv = create_token();
     let token_client = create_token();
-    poller.registry().register(stream_srv, token_srv, Interest::READABLE | Interest::WRITABLE)?;
-    poller.registry().register(stream_cli, token_client, Interest::READABLE | Interest::WRITABLE)?;
+    poller.registry().register(stream_srv, token_srv, Interest::READABLE)?;
+    poller.registry().register(stream_cli, token_client, Interest::READABLE)?;
     Ok((token_srv, token_client))
 }
 

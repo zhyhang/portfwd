@@ -79,17 +79,11 @@ fn event_loop(poller: Arc<Mutex<Poll>>,
                     }
                 }
             } else if let Some(tun) = tun_map.lock().unwrap().get(&token) {
-                if (event.is_readable()) {//TODO read Poll document and handle reade_close...
-                    commit_sync_data(poller, pool, tun_map.clone(), tun);
-                }else{
-                    if !event.is_writable(){
-                        println!("Accept not readable and not writable event: {:?}", event);
-                    }
-
-                }
+                //read Poll document and handle read_close (we handle it same as readable())
+                println!("Accept readable event:  {:?}", event);
+                commit_sync_data(poller, pool, tun_map.clone(), tun);
             } else {
-                println!("Cannot found the poll token in socket tunnel map, exit! ");
-                // return Err(Box::new(Error::new(ErrorKind::NotFound, "Poll token not in tunnel map")));
+                println!("Cannot found the poll token {:?} in socket tunnel map! ", token);
             }
         }
     }
