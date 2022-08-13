@@ -7,6 +7,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Mutex;
 use std::thread;
 
+#[derive(Debug)]
 pub struct ThreadPool {
     workers: Vec<Worker>,
     sender: mpsc::Sender<Message>,
@@ -74,6 +75,7 @@ impl Drop for ThreadPool {
     }
 }
 
+#[derive(Debug)]
 struct Worker {
     id: usize,
     thread: Option<thread::JoinHandle<()>>,
