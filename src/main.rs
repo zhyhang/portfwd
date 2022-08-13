@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mio::{Events, Interest, Poll, Token};
+use mio::event::Event;
 use mio::net::{TcpListener, TcpStream};
 
 use portfwd::ThreadPool;
@@ -52,49 +53,57 @@ fn event_loop(poller: Arc<Mutex<Poll>>,
               tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>,
               pool: &ThreadPool) -> Result<(), Box<dyn std::error::Error>> {
     loop {
-        // Poll Mio for events, blocking until we get an event.
+        // Poll Mio for events, blocking until we get an event or timeout.
+        // Must config timeout, or else multi-thread operate poller will lead to dead loop.
         poller.lock().unwrap().poll(events, Some(Duration::from_millis(2)))?;
-        // Process each event.
         for event in events.iter() {
-            let token = event.token();
-            let poller = poller.clone();
-            if let Some(srv) = server_map.get(&token) {
-                loop {
-                    let poller = poller.clone();
-                    match srv.accept() {
-                        Ok(stream) => {
-                            let stream_srv = Arc::new(Mutex::new(stream));
-                            let tun_map_clone = tun_map.clone();
-                            let remote_addr = srv.remote_addr;
-                            pool.execute(move || {
-                                connect(poller.clone(), tun_map_clone.clone(), stream_srv.clone(), remote_addr);
-                                false
-                            });
-                        }
-                        Err(e) if e.kind() == ErrorKind::WouldBlock => break,
-                        Err(e) => {
-                            println!("Tcp server accept connection error {}, continue next event handle.", e);
-                            return Err(Box::new(Error::new(ErrorKind::BrokenPipe, "accept connect error")));
-                        }
-                    }
-                }
-            } else if let Some(tun) = tun_map.lock().unwrap().get(&token) {
-                //read Poll document and handle read_close (we handle it same as readable())
-                println!("Accept readable event:  {:?}", event);
-                commit_sync_data(poller, pool, tun_map.clone(), tun);
-            } else {
-                println!("Cannot found the poll token {:?} in socket tunnel map! ", token);
-            }
+            event_handle(poller.clone(), server_map, tun_map.clone(), pool, event);
         }
     }
 }
 
-fn commit_sync_data(poller: Arc<Mutex<Poll>>, pool: &ThreadPool,
+fn event_handle(poller: Arc<Mutex<Poll>>, server_map: &HashMap<Token, ForwardServer>,
+                tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>, pool: &ThreadPool, event: &Event)
+    -> Result<(), Box<dyn std::error::Error>> {
+    let token = event.token();
+    if let Some(srv) = server_map.get(&token) {
+        while accept_handle(poller.clone(), srv, &tun_map, pool)? {};
+    } else if let Some(tun) = tun_map.lock().unwrap().get(&token) {
+        //read Poll document and handle read_close (we handle it same as readable)
+        commit_sync_task(poller, pool, tun_map.clone(), tun);
+    } else {
+        println!("Cannot found the poll token {:?} in socket tunnel map! ", token);
+    }
+    Ok(())
+}
+
+fn accept_handle(poller: Arc<Mutex<Poll>>, srv: &ForwardServer, tun_map: &Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>,
+                 pool: &ThreadPool)-> Result<bool, Box<dyn std::error::Error>> {
+    match srv.accept() {
+        Ok(stream) => {
+            let stream_srv = Arc::new(Mutex::new(stream));
+            let tun_map_clone = tun_map.clone();
+            let remote_addr = srv.remote_addr;
+            pool.execute(move || {
+                connect(poller.clone(), tun_map_clone.clone(), stream_srv.clone(), remote_addr);
+                false
+            });
+        }
+        Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(false),
+        Err(e) => {
+            println!("Tcp server accept connection error {}, continue next event handle.", e);
+            return Err(Box::new(Error::new(ErrorKind::BrokenPipe, "accept connect error")));
+        }
+    }
+    Ok(true)
+}
+
+fn commit_sync_task(poller: Arc<Mutex<Poll>>, pool: &ThreadPool,
                     tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>, tun: &Arc<Mutex<SocketTun>>) {
-    let tun_map_clone = tun_map.clone();
+    let tun_map = tun_map.clone();
     let tun = tun.clone();
     pool.execute(move || {
-        sync_data(poller.clone(), tun_map_clone.clone(), tun.clone());
+        sync_data(poller.clone(), tun_map.clone(), tun.clone());
         false
     });
 }
