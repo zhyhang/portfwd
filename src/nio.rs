@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, SocketAddr};
+use std::net::Shutdown::Both;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,10 +17,156 @@ use portfwd::ThreadPool;
 
 const EVENTS_CAPACITY: usize = 1024;
 const TRANSFER_BUF_CAPACITY: usize = 4096;
-const POLL_TIMEOUT:Duration = Duration::from_millis(2);
+const POLL_TIMEOUT: Duration = Duration::from_millis(2);
 
 // Global token counter for which socket.
 static TOKEN_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Debug)]
+pub struct Cluster {
+    poller: Arc<Mutex<Poll>>,
+    servers: HashMap<Token, ForwardServer>,
+    tunnels: Arc<Mutex<HashMap<Token, Arc<Mutex<TcpTun>>>>>,
+    pool: ThreadPool,
+}
+
+
+impl Cluster {
+    pub fn new() -> std::io::Result<Cluster> {
+        // Create thread pool
+        let cpus = num_cpus::get();
+        let pool_size = if cpus > 1 { cpus - 1 } else { cpus };
+        let pool = ThreadPool::new(pool_size);
+        // Create a poll instance.
+        let poller = Arc::new(Mutex::new(Poll::new()?));
+        // Create storage for events.
+        let servers = HashMap::new();
+        let tunnels = Arc::new(Mutex::new(HashMap::new()));
+        Ok(Cluster { poller, servers, tunnels, pool })
+    }
+
+    pub fn start_with(&mut self, forward_addrs: &[String]) -> std::io::Result<()> {
+        //start listeners in term of input args
+        for addr_i in (0..forward_addrs.len()).step_by(2) {
+            let local_addr = forward_addrs.get(addr_i);
+            let remote_addr = forward_addrs.get(addr_i + 1);
+            self.listen(local_addr.unwrap(), remote_addr.unwrap())?;
+        }
+        //infinite loop to poll events and deal them
+        self.event_loop();
+        Ok(())
+    }
+
+    fn listen(&mut self, local_addr: &String, remote_addr: &String) -> std::io::Result<()> {
+        match ForwardServer::start(local_addr, remote_addr) {
+            Ok(mut server) => {
+                server.register(self.poller.lock().as_ref().unwrap());
+                self.servers.insert(server.token, server);
+                println!("Open Listening on {} success", local_addr);
+                return Ok(());
+            }
+            Err(e) => {
+                println!("Open listening on {} error: {}", local_addr, e);
+                return Err(e);
+            }
+        };
+    }
+
+    fn event_loop(&mut self) -> std::io::Result<()> {
+        let mut events = Events::with_capacity(EVENTS_CAPACITY);
+        loop {
+            // Poll Mio for events, blocking until we get an event or timeout.
+            // Must config timeout, or else multi-thread operate poller will lead to dead loop.
+            self.poller.lock().unwrap().poll(&mut events, Some(POLL_TIMEOUT))?;
+            for event in &events {
+                self.event_handle(event);
+            }
+        }
+    }
+
+    fn event_handle(&self, event: &Event) -> std::io::Result<()> {
+        let token = event.token();
+        if let Some(srv) = self.servers.get(&token) {
+            while self.accept_handle(srv)? {};
+        } else if let Some(tun) = self.tunnels.lock().unwrap().get(&token) {
+            //read Poll document and handle read_close (we handle it same as readable)
+            self.commit_transfer_task(tun.clone(), token);
+        } else {
+            println!("Cannot found the poll token {:?} in tcp tunnel map! ", token);
+        }
+        Ok(())
+    }
+
+    fn accept_handle(&self, srv: &ForwardServer) -> std::io::Result<bool> {
+        match srv.accept_connect() {
+            Ok(tun) => self.commit_establish_task(tun),
+            Err(e) if is_would_block_err(&e) => return Ok(false),
+            Err(e) => {
+                println!("Accept connection error {}, continue next event handle.", e);
+                return Err(e);
+            }
+        }
+        Ok(true)
+    }
+
+    fn cache_tun(tunnels: Arc<Mutex<HashMap<Token, Arc<Mutex<TcpTun>>>>>, tun_mutex: Arc<Mutex<TcpTun>>) {
+        let source_token = tun_mutex.lock().unwrap().source_token;
+        let target_token = tun_mutex.lock().unwrap().target_token;
+        tunnels.lock().unwrap().insert(source_token, tun_mutex.clone());
+        tunnels.lock().unwrap().insert(target_token, tun_mutex.clone());
+    }
+
+    fn un_cache_tun(tunnels: Arc<Mutex<HashMap<Token, Arc<Mutex<TcpTun>>>>>, tun_mutex: Arc<Mutex<TcpTun>>) {
+        tunnels.lock().unwrap().remove(&tun_mutex.lock().unwrap().source_token);
+        tunnels.lock().unwrap().remove(&tun_mutex.lock().unwrap().target_token);
+    }
+
+    fn commit_establish_task(&self, tun: TcpTun) {
+        let poller = self.poller.clone();
+        let tunnels = self.tunnels.clone();
+        let tun_mutex = Arc::new(Mutex::new(tun));
+        let task = move || Self::establish_task(poller.clone(), tunnels.clone(), tun_mutex.clone());
+        self.pool.execute(task);
+    }
+
+    fn establish_task(poller: Arc<Mutex<Poll>>, tunnels: Arc<Mutex<HashMap<Token, Arc<Mutex<TcpTun>>>>>,
+                      tun_mutex: Arc<Mutex<TcpTun>>) -> bool {
+        match tun_mutex.lock().unwrap().establish() {
+            Ok(_) => {
+                Self::cache_tun(tunnels.clone(), tun_mutex.clone());
+                tun_mutex.lock().unwrap().register(poller.lock().as_ref().unwrap());
+            }
+            Err(e) => {
+                tun_mutex.lock().unwrap().close();
+                println!("Failure to connect {}, error: {}", tun_mutex.lock().unwrap().target_addr, e);
+            }
+        }
+        false
+    }
+
+    fn commit_transfer_task(&self, tun_mutex: Arc<Mutex<TcpTun>>, from_token: Token) {
+        let tunnels = self.tunnels.clone();
+        let poller = self.poller.clone();
+        self.pool.execute(move || Self::transfer_task(tun_mutex.clone(), from_token,
+                                                      tunnels.clone(), poller.clone()));
+    }
+
+    fn transfer_task(tun_mutex: Arc<Mutex<TcpTun>>, from_token: Token,
+                     tunnels: Arc<Mutex<HashMap<Token, Arc<Mutex<TcpTun>>>>>, poller: Arc<Mutex<Poll>>) -> bool {
+        match tun_mutex.lock().unwrap().transfer_data(from_token) {
+            Ok(_) => {}
+            Err(e) => {
+                tun_mutex.lock().unwrap().deregister(poller.lock().as_ref().unwrap());
+                Self::un_cache_tun(tunnels.clone(), tun_mutex.clone());
+                tun_mutex.lock().unwrap().close();
+                let src_addr = tun_mutex.lock().unwrap().source_addr;
+                let target_addr = tun_mutex.lock().unwrap().target_addr;
+                println!("Copy from {} to {} error {}", src_addr, target_addr, e);
+            }
+        }
+        false
+    }
+}
 
 #[derive(Debug)]
 struct ForwardServer {
@@ -64,14 +211,6 @@ impl ForwardServer {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct SocketTun {
-    pub source_token: Token,
-    pub target_token: Token,
-    pub source: Arc<Mutex<TcpStream>>,
-    pub target: Arc<Mutex<TcpStream>>,
-}
-
 #[derive(Debug)]
 struct TcpTun {
     source_token: Token,
@@ -87,19 +226,19 @@ impl TcpTun {
         self.target.is_some()
     }
 
-    pub fn establish(&mut self) -> std::io::Result<bool> {
+    pub fn establish(&mut self) -> std::io::Result<()> {
         let remote_addr = self.target_addr;
         let stream_target = TcpStream::connect(remote_addr)?;
         self.target = Some(stream_target);
         println!("Successfully connected to remote in {}", remote_addr);
-        Ok(true)
+        Ok(())
     }
 
-    pub fn register(&mut self, poller: &Poll) -> std::io::Result<bool> {
+    pub fn register(&mut self, poller: &Poll) -> std::io::Result<()> {
         let reg = poller.registry();
         reg.register(&mut self.source, self.source_token, Interest::READABLE)?;
         reg.register(self.target.as_mut().unwrap(), self.target_token, Interest::READABLE)?;
-        Ok(true)
+        Ok(())
     }
 
     pub fn deregister(&mut self, poller: &Poll) -> std::io::Result<bool> {
@@ -109,7 +248,7 @@ impl TcpTun {
         Ok(true)
     }
 
-    pub fn transfer_data(&mut self, from_token: Token) -> std::io::Result<bool> {
+    pub fn transfer_data(&mut self, from_token: Token) -> std::io::Result<usize> {
         let (source, target) = if from_token == self.source_token {
             (&mut self.source, self.target.as_mut().unwrap())
         } else {
@@ -128,16 +267,16 @@ impl TcpTun {
         let src_addr = source.peer_addr().unwrap();
         let target_addr = target.peer_addr().unwrap();
         println!("Copy {} bytes from {} to {}", total, src_addr, target_addr);
-        Ok(true)
+        Ok(total)
     }
 
-    fn read_write(source: &mut TcpStream, target: &mut TcpStream, buffer: &mut [u8; 4096]) -> std::io::Result<usize> {
+    fn read_write(source: &mut TcpStream, target: &mut TcpStream, buffer: &mut [u8]) -> std::io::Result<usize> {
         let mut count = 0;
         let result = source.read(buffer);
         if result.is_ok() {
             let current_count = result.unwrap();
             if current_count > 0 {
-                Self::write_to(target, buffer, current_count);
+                Self::write_to(target, buffer, current_count)?;
                 count += current_count;
             } else {
                 return Err(create_broken_err(source));
@@ -156,6 +295,8 @@ impl TcpTun {
     fn write_to(target: &mut TcpStream, buffer: &[u8], size: usize) -> std::io::Result<usize> {
         let mut start_index = 0;
         loop {
+            //TODO An error of the ErrorKind::Interrupted kind is non-fatal and the write operation
+            // should be retried if there is nothing else to do.
             let count = target.write(&buffer[start_index..size])?;
             if count == 0 {
                 return Err(create_broken_err(target));
@@ -164,153 +305,16 @@ impl TcpTun {
                 start_index += count;
                 continue;
             }
-            //TODO An error of the ErrorKind::Interrupted kind is non-fatal and the write operation
-            // should be retried if there is nothing else to do.
             return Ok(size);
         }
     }
-}
 
-#[derive(Debug)]
-pub struct Cluster {
-    poller: Arc<Mutex<Poll>>,
-    servers: HashMap<Token, ForwardServer>,
-    tunnels: Arc<Mutex<HashMap<Token, Arc<Mutex<TcpTun>>>>>,
-    pool: ThreadPool,
-}
-
-
-impl Cluster {
-    pub fn new() -> std::io::Result<Cluster> {
-        // Create thread pool
-        let cpus = num_cpus::get();
-        let pool_size = if cpus > 1 { cpus - 1 } else { cpus };
-        let pool = ThreadPool::new(pool_size);
-        // Create a poll instance.
-        let poller = Arc::new(Mutex::new(Poll::new()?));
-        // Create storage for events.
-        let servers = HashMap::new();
-        let tunnels = Arc::new(Mutex::new(HashMap::new()));
-        Ok(Cluster { poller, servers, tunnels, pool})
-    }
-
-    pub fn start_with(&mut self, forward_addrs: &[String]) -> std::io::Result<()>{
-        for addr_i in (0..forward_addrs.len()).step_by(2) {
-            let local_addr = forward_addrs.get(addr_i);
-            let remote_addr = forward_addrs.get(addr_i + 1);
-            self.listen(local_addr.unwrap(), remote_addr.unwrap())?;
-        }
-        self.event_loop();
-        Ok(())
-    }
-
-    fn listen(&mut self, local_addr: &String, remote_addr: &String) -> std::io::Result<()> {
-        match ForwardServer::start(local_addr, remote_addr) {
-            Ok(mut server) => {
-                server.register(self.poller.lock().as_ref().unwrap());
-                self.servers.insert(server.token, server);
-                println!("Open Listening on {} success", local_addr);
-                return Ok(());
-            }
-            Err(e) => {
-                println!("Open listening on {} error: {}", local_addr, e);
-                return Err(e);
-            }
-        };
-    }
-
-    fn event_loop(& mut self) -> std::io::Result<()>{
-        let mut events = Events::with_capacity(EVENTS_CAPACITY);
-        loop {
-            // Poll Mio for events, blocking until we get an event or timeout.
-            // Must config timeout, or else multi-thread operate poller will lead to dead loop.
-            self.poller.lock().unwrap().poll(&mut events, Some(POLL_TIMEOUT))?;
-            for event in &events {
-                self.event_handle(event);
-            }
+    pub fn close(&self) {
+        self.source.shutdown(Both);
+        if (self.target.is_some()) {
+            self.target.as_ref().unwrap().shutdown(Both);
         }
     }
-
-    fn event_handle(&self, event: &Event)-> std::io::Result<()> {
-        let token = event.token();
-        if let Some(srv) = self.servers.get(&token) {
-            while self.accept_handle(srv)? {};
-        } else if let Some(tun) = self.tunnels.lock().unwrap().get(&token) {
-            //read Poll document and handle read_close (we handle it same as readable)
-            self.commit_sync_task(tun.clone(), token);
-        } else {
-            println!("Cannot found the poll token {:?} in socket tunnel map! ", token);
-        }
-        Ok(())
-    }
-
-    fn accept_handle(&self, srv: &ForwardServer) -> std::io::Result<bool> {
-        match srv.accept_connect() {
-            Ok(tun) => {
-                let tun_mutex = Arc::new(Mutex::new(tun));
-                self.tunnels.lock().unwrap().insert(tun_mutex.lock().unwrap().source_token, tun_mutex.clone());
-                self.tunnels.lock().unwrap().insert(tun_mutex.lock().unwrap().target_token, tun_mutex.clone());
-                self.pool.execute(move || {
-                    let tun_mutex_clone = tun_mutex.clone();
-                    //TODO error handle
-                    tun_mutex_clone.lock().unwrap().establish();
-                    false
-                });
-            }
-            Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(false),
-            Err(e) => {
-                println!("Tcp server accept connection error {}, continue next event handle.", e);
-                return Err(e);
-            }
-        }
-        Ok(true)
-    }
-
-    fn commit_sync_task(&self, tun: Arc<Mutex<TcpTun>>, from_token: Token) {
-        self.pool.execute(move || {
-            tun.lock().unwrap().transfer_data(from_token);
-            false
-        });
-    }
-}
-
-pub fn connect(poller: Arc<Mutex<Poll>>, socket_tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>,
-               stream_srv: Arc<Mutex<TcpStream>>, remote_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
-    match TcpStream::connect(remote_addr) {
-        Ok(mut stream_cli) => {
-            let (token_srv, token_cli) = register_tun(poller.lock().as_ref().unwrap(),
-                                                      stream_srv.lock().as_deref_mut().unwrap(),
-                                                      &mut stream_cli)?;
-            cache_tun(socket_tun_map, token_srv, stream_srv, token_cli,
-                      Arc::new(Mutex::new(stream_cli)));
-            println!("Successfully connected to remote in {}", remote_addr);
-            return Ok(());
-        }
-        Err(e) => {
-            let stream_connected = stream_srv.lock().unwrap();
-            println!("Failed to connect remote: {}, close client connection: {}, {}",
-                     remote_addr, stream_connected.peer_addr().unwrap(), e);
-            stream_connected.shutdown(Shutdown::Both);// shutdown stream from outer client
-            return Err(Box::<dyn Error>::from(e));
-        }
-    }
-}
-
-fn register_tun(poller: &Poll, stream_srv: &mut TcpStream, stream_cli: &mut TcpStream) -> Result<(Token, Token), Box<dyn Error>> {
-    let token_srv = create_token();
-    let token_client = create_token();
-    poller.registry().register(stream_srv, token_srv, Interest::READABLE)?;
-    poller.registry().register(stream_cli, token_client, Interest::READABLE)?;
-    Ok((token_srv, token_client))
-}
-
-fn cache_tun(tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>, token_srv: Token,
-             stream_srv: Arc<Mutex<TcpStream>>, token_cli: Token, stream_cli: Arc<Mutex<TcpStream>>) {
-    let mut map = tun_map.lock().unwrap();
-    let tun_srv = SocketTun { source_token: token_srv, target_token: token_cli, source: stream_srv.clone(), target: stream_cli.clone() };
-    let tun_cli = SocketTun { source_token: token_cli, target_token: token_srv, source: stream_cli.clone(), target: stream_srv.clone() };
-    map.insert(token_srv, Arc::new(Mutex::new(tun_srv)));
-    map.insert(token_cli, Arc::new(Mutex::new(tun_cli)));
 }
 
 fn create_token() -> Token {
@@ -318,106 +322,10 @@ fn create_token() -> Token {
 }
 
 fn is_would_block_err(e: &std::io::Error) -> bool {
-    e.kind() == std::io::ErrorKind::WouldBlock
-}
-
-
-pub fn sync_data(poller: Arc<Mutex<Poll>>, tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>,
-                 tun: Arc<Mutex<SocketTun>>) {
-    let mut buffer = [0; 4096];
-    let mut count = 0;
-    loop {
-        // read from source
-        let result = tun.lock().unwrap().source.lock().unwrap().read(&mut buffer);
-        let result = result.as_ref();
-        if result.is_err() && is_would_block(result.err().unwrap()) {
-            break;
-        } else if result.is_err() {
-            when_error(poller.clone(), tun_map.clone(), tun.clone(),
-                       result.err().as_ref().unwrap());
-            return;
-        } else if *result.unwrap() == 0 {
-            let e = &create_broken_err(tun.lock().unwrap().source.lock().as_ref().unwrap());
-            when_error(poller.clone(), tun_map.clone(), tun.clone(), e);
-            return;
-        }
-        let this_count = *result.unwrap();
-        let result_write = write_target(tun.lock().unwrap().target.lock().as_mut().unwrap(), &buffer, this_count);
-        if result_write.is_err() {
-            when_error(poller.clone(), tun_map.clone(), tun.clone(),
-                       result_write.err().as_ref().unwrap());
-            return;
-        }
-        count += this_count;
-    }
-    let src_addr = tun.lock().unwrap().source.lock().as_ref().unwrap().peer_addr().unwrap();
-    let target_addr = tun.lock().unwrap().target.lock().as_ref().unwrap().peer_addr().unwrap();
-    println!("Copy {} bytes from {} to {}", count, src_addr, target_addr);
-}
-
-fn write_target(target: &mut TcpStream, buffer: &[u8], size: usize) -> Result<usize, std::io::Error> {
-    let mut start_index = 0;
-    loop {
-        let result = target.write(&buffer[start_index..size]);
-        if result.is_err() {
-            return Err(result.err().unwrap());
-        } else {
-            let count = result.unwrap();
-            if count == 0 {
-                return Err(create_broken_err(target));
-            }
-            if count < size - start_index {
-                start_index += count;
-                continue;
-            }
-            //TODO An error of the ErrorKind::Interrupted kind is non-fatal and the write operation
-            // should be retried if there is nothing else to do.
-            return Ok(size);
-        }
-    }
+    e.kind() == ErrorKind::WouldBlock
 }
 
 fn create_broken_err(stream: &TcpStream) -> std::io::Error {
     let msg = format!("peer {} close the tunnel", stream.peer_addr().unwrap());
-    std::io::Error::new(std::io::ErrorKind::BrokenPipe, msg)
-}
-
-fn is_would_block(e: &std::io::Error) -> bool {
-    e.kind() == std::io::ErrorKind::WouldBlock
-}
-
-fn when_error(poller: Arc<Mutex<Poll>>, tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>,
-              tun: Arc<Mutex<SocketTun>>, e: &std::io::Error) {
-    remove_tun_from_cache(tun_map, tun.clone());
-    let tun_unwrap = tun.lock().unwrap();
-    let mut source = tun_unwrap.source.lock().unwrap();
-    let mut target = tun_unwrap.target.lock().unwrap();
-    deregister_tun(poller, source.deref_mut(), target.deref_mut());
-    close_tun_print_err(source.deref(), target.deref(), e);
-}
-
-
-fn remove_tun_from_cache(tun_map: Arc<Mutex<HashMap<Token, Arc<Mutex<SocketTun>>>>>, tun_any: Arc<Mutex<SocketTun>>) {
-    println!("remove tun map...");
-    tun_map.lock().unwrap().remove(&(tun_any.lock().unwrap().source_token));
-    println!("removed tun map1");
-    tun_map.lock().unwrap().remove(&(tun_any.lock().unwrap().target_token));
-    println!("removed tun map2");
-}
-
-fn deregister_tun(poller: Arc<Mutex<Poll>>, source: &mut TcpStream, target: &mut TcpStream) {
-    println!("deregister_lock...");
-    let poller_locked = poller.lock().unwrap();
-    poller_locked.registry().deregister(source);
-    println!("deregister_locked1");
-    poller_locked.registry().deregister(target);
-    println!("deregister_locked2");
-}
-
-fn close_tun_print_err(source: &TcpStream, target: &TcpStream, e: &std::io::Error) {
-    let src_addr = source.peer_addr().unwrap();
-    let target_addr = target.peer_addr().unwrap();
-    println!("Copy from {} to {} error {}", src_addr, target_addr, e);
-    source.shutdown(Shutdown::Both);
-    target.shutdown(Shutdown::Both);
+    std::io::Error::new(ErrorKind::BrokenPipe, msg)
 }
