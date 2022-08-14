@@ -1,9 +1,7 @@
-use std::{error, thread};
 use std::borrow::{Borrow, BorrowMut};
 use std::collections::HashMap;
 use std::error::Error;
 use std::io::{ErrorKind, Read, Write};
-use std::marker::PhantomData;
 use std::net::{Shutdown, SocketAddr};
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex};
@@ -18,16 +16,17 @@ use portfwd::ThreadPool;
 
 const EVENTS_CAPACITY: usize = 1024;
 const TRANSFER_BUF_CAPACITY: usize = 4096;
+const POLL_TIMEOUT:Duration = Duration::from_millis(2);
 
 // Global token counter for which socket.
 static TOKEN_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug)]
-pub struct ForwardServer {
-    pub local_addr: SocketAddr,
-    pub remote_addr: SocketAddr,
-    pub listener: TcpListener,
-    pub token: Token,
+struct ForwardServer {
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
+    listener: TcpListener,
+    token: Token,
 }
 
 impl ForwardServer {
@@ -74,13 +73,13 @@ pub struct SocketTun {
 }
 
 #[derive(Debug)]
-pub struct TcpTun {
-    pub source_token: Token,
-    pub target_token: Token,
-    pub source: TcpStream,
-    pub target: Option<TcpStream>,
-    pub source_addr: SocketAddr,
-    pub target_addr: SocketAddr,
+struct TcpTun {
+    source_token: Token,
+    target_token: Token,
+    source: TcpStream,
+    target: Option<TcpStream>,
+    source_addr: SocketAddr,
+    target_addr: SocketAddr,
 }
 
 impl TcpTun {
@@ -174,10 +173,10 @@ impl TcpTun {
 
 #[derive(Debug)]
 pub struct Cluster {
-    pub poller: Arc<Mutex<Poll>>,
-    pub servers: HashMap<Token, ForwardServer>,
-    pub tunnels: Arc<Mutex<HashMap<Token, Arc<Mutex<TcpTun>>>>>,
-    pub pool: ThreadPool,
+    poller: Arc<Mutex<Poll>>,
+    servers: HashMap<Token, ForwardServer>,
+    tunnels: Arc<Mutex<HashMap<Token, Arc<Mutex<TcpTun>>>>>,
+    pool: ThreadPool,
 }
 
 
@@ -190,18 +189,19 @@ impl Cluster {
         // Create a poll instance.
         let poller = Arc::new(Mutex::new(Poll::new()?));
         // Create storage for events.
-        let mut servers = HashMap::new();
+        let servers = HashMap::new();
         let tunnels = Arc::new(Mutex::new(HashMap::new()));
         Ok(Cluster { poller, servers, tunnels, pool})
     }
 
-    pub fn start_with(&mut self, forward_addrs: &[String]) {
+    pub fn start_with(&mut self, forward_addrs: &[String]) -> std::io::Result<()>{
         for addr_i in (0..forward_addrs.len()).step_by(2) {
             let local_addr = forward_addrs.get(addr_i);
             let remote_addr = forward_addrs.get(addr_i + 1);
-            self.listen(local_addr.unwrap(), remote_addr.unwrap());
+            self.listen(local_addr.unwrap(), remote_addr.unwrap())?;
         }
         self.event_loop();
+        Ok(())
     }
 
     fn listen(&mut self, local_addr: &String, remote_addr: &String) -> std::io::Result<()> {
@@ -219,19 +219,19 @@ impl Cluster {
         };
     }
 
-    fn event_loop(& mut self) {
+    fn event_loop(& mut self) -> std::io::Result<()>{
         let mut events = Events::with_capacity(EVENTS_CAPACITY);
         loop {
             // Poll Mio for events, blocking until we get an event or timeout.
             // Must config timeout, or else multi-thread operate poller will lead to dead loop.
-            self.poller.lock().unwrap().poll(&mut events, Some(Duration::from_millis(2))).unwrap();
+            self.poller.lock().unwrap().poll(&mut events, Some(POLL_TIMEOUT))?;
             for event in &events {
                 self.event_handle(event);
             }
         }
     }
 
-    fn event_handle(& self, event: &Event) -> Result<(), Box<dyn std::error::Error>> {
+    fn event_handle(&self, event: &Event)-> std::io::Result<()> {
         let token = event.token();
         if let Some(srv) = self.servers.get(&token) {
             while self.accept_handle(srv)? {};
