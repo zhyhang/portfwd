@@ -59,7 +59,7 @@ impl Cluster {
             Ok(mut server) => {
                 server.register(self.poller.lock().as_ref().unwrap())?;
                 self.servers.insert(server.token, server);
-                println!("Open Listening on {} success", local_addr);
+                println!("Open Listening on {} success.", local_addr);
                 return Ok(());
             }
             Err(e) => {
@@ -152,10 +152,12 @@ impl Cluster {
 
     fn transfer_task(tun_mutex: Arc<Mutex<TcpTun>>, from_token: Token,
                      tunnels: Arc<Mutex<HashMap<Token, Arc<Mutex<TcpTun>>>>>, poller: Arc<Mutex<Poll>>) -> bool {
-        match tun_mutex.lock().unwrap().transfer_data(from_token) {
+        let result = tun_mutex.lock().unwrap().transfer_data(from_token);
+        match result {
             Ok(_) => {}
             Err(e) => {
-                tun_mutex.lock().unwrap().deregister(poller.lock().as_ref().unwrap()).unwrap();
+                //ignore the deregister error
+                tun_mutex.lock().unwrap().deregister(poller.lock().as_ref().unwrap());
                 Self::un_cache_tun(tunnels.clone(), tun_mutex.clone());
                 tun_mutex.lock().unwrap().close();
                 let src_addr = tun_mutex.lock().unwrap().source_addr;
@@ -200,6 +202,7 @@ impl ForwardServer {
             target: None,
             source_addr: self.local_addr,
             target_addr: self.remote_addr,
+            is_transferred: false,
         };
         Ok(tunnel)
     }
@@ -213,6 +216,7 @@ struct TcpTun {
     target: Option<TcpStream>,
     source_addr: SocketAddr,
     target_addr: SocketAddr,
+    is_transferred: bool,
 }
 
 impl TcpTun {
@@ -222,9 +226,10 @@ impl TcpTun {
 
     pub fn establish(&mut self) -> std::io::Result<()> {
         let remote_addr = self.target_addr;
+        //Maybe not connected although connect method return without error
         let stream_target = TcpStream::connect(remote_addr)?;
         self.target = Some(stream_target);
-        println!("Successfully connected to {}", remote_addr);
+        println!("Connect to {}...", remote_addr);
         Ok(())
     }
 
@@ -238,7 +243,9 @@ impl TcpTun {
     pub fn deregister(&mut self, poller: &Poll) -> std::io::Result<bool> {
         let reg = poller.registry();
         reg.deregister(&mut self.source)?;
-        reg.deregister(self.target.as_mut().unwrap())?;
+        if self.is_established() {
+            reg.deregister(self.target.as_mut().unwrap())?;
+        }
         Ok(true)
     }
 
@@ -256,6 +263,10 @@ impl TcpTun {
                 total += count;
             } else {
                 break;
+            }
+            if !self.is_transferred {
+                self.is_transferred = true;
+                println!("Connect to {} success.", self.target_addr)
             }
         }
         let src_addr = source.peer_addr().unwrap();

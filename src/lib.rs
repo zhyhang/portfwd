@@ -4,8 +4,6 @@ use std::sync::mpsc::{Sender};
 use std::sync::Mutex;
 use std::thread;
 
-mod lib_nio;
-
 #[derive(Debug)]
 pub struct ThreadPool {
     workers: Vec<Worker>,
@@ -40,7 +38,7 @@ impl ThreadPool {
         for id in 0..size {
             workers.push(Worker::new(id, receiver.clone(), sender_clone.clone()));
         }
-
+        println!("Create thread pool with {} workers.", size);
         ThreadPool { workers, sender }
     }
 
