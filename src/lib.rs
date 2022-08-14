@@ -1,10 +1,10 @@
-use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Sender};
 use std::sync::Mutex;
 use std::thread;
 
+#[derive(Debug)]
 pub struct ThreadPool {
     workers: Vec<Worker>,
     sender: mpsc::Sender<Message>,
@@ -38,7 +38,7 @@ impl ThreadPool {
         for id in 0..size {
             workers.push(Worker::new(id, receiver.clone(), sender_clone.clone()));
         }
-
+        println!("Create thread pool with {} workers.", size);
         ThreadPool { workers, sender }
     }
 
@@ -72,6 +72,7 @@ impl Drop for ThreadPool {
     }
 }
 
+#[derive(Debug)]
 struct Worker {
     id: usize,
     thread: Option<thread::JoinHandle<()>>,
@@ -87,7 +88,7 @@ impl Worker {
                     // println!("Worker {} got a job; executing.", id);
 
                     if job() {
-                        sender.lock().unwrap().send(Message::NewJob(job));
+                        sender.lock().unwrap().send(Message::NewJob(job)).unwrap();
                     }
                 }
                 Message::Terminate => {
