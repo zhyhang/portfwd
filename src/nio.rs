@@ -127,7 +127,8 @@ impl Cluster {
 
     fn establish_task(poller: Arc<Mutex<Poll>>, tunnels: Arc<Mutex<HashMap<Token, Arc<Mutex<TcpTun>>>>>,
                       tun_mutex: Arc<Mutex<TcpTun>>) -> bool {
-        match tun_mutex.lock().unwrap().establish() {
+        let result = tun_mutex.lock().unwrap().establish();
+        match result {
             Ok(_) => {
                 Self::cache_tun(tunnels.clone(), tun_mutex.clone());
                 tun_mutex.lock().unwrap().register(poller.lock().as_ref().unwrap()).unwrap();
