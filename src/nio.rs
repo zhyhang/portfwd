@@ -1,10 +1,7 @@
-use std::borrow::{Borrow, BorrowMut};
 use std::collections::HashMap;
-use std::error::Error;
 use std::io::{ErrorKind, Read, Write};
-use std::net::{Shutdown, SocketAddr};
+use std::net::{SocketAddr};
 use std::net::Shutdown::Both;
-use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -53,14 +50,14 @@ impl Cluster {
             self.listen(local_addr.unwrap(), remote_addr.unwrap())?;
         }
         //infinite loop to poll events and deal them
-        self.event_loop();
+        self.event_loop()?;
         Ok(())
     }
 
     fn listen(&mut self, local_addr: &String, remote_addr: &String) -> std::io::Result<()> {
         match ForwardServer::start(local_addr, remote_addr) {
             Ok(mut server) => {
-                server.register(self.poller.lock().as_ref().unwrap());
+                server.register(self.poller.lock().as_ref().unwrap())?;
                 self.servers.insert(server.token, server);
                 println!("Open Listening on {} success", local_addr);
                 return Ok(());
@@ -79,7 +76,7 @@ impl Cluster {
             // Must config timeout, or else multi-thread operate poller will lead to dead loop.
             self.poller.lock().unwrap().poll(&mut events, Some(POLL_TIMEOUT))?;
             for event in &events {
-                self.event_handle(event);
+                self.event_handle(event)?;
             }
         }
     }
@@ -89,7 +86,6 @@ impl Cluster {
         if let Some(srv) = self.servers.get(&token) {
             while self.accept_handle(srv)? {};
         } else if let Some(tun) = self.tunnels.lock().unwrap().get(&token) {
-            //read Poll document and handle read_close (we handle it same as readable)
             self.commit_transfer_task(tun.clone(), token);
         } else {
             println!("Cannot found the poll token {:?} in tcp tunnel map! ", token);
@@ -102,7 +98,7 @@ impl Cluster {
             Ok(tun) => self.commit_establish_task(tun),
             Err(e) if is_would_block_err(&e) => return Ok(false),
             Err(e) => {
-                println!("Accept connection error {}, continue next event handle.", e);
+                println!("Accept connection error {}, exit!", e);
                 return Err(e);
             }
         }
@@ -134,7 +130,7 @@ impl Cluster {
         match tun_mutex.lock().unwrap().establish() {
             Ok(_) => {
                 Self::cache_tun(tunnels.clone(), tun_mutex.clone());
-                tun_mutex.lock().unwrap().register(poller.lock().as_ref().unwrap());
+                tun_mutex.lock().unwrap().register(poller.lock().as_ref().unwrap()).unwrap();
             }
             Err(e) => {
                 tun_mutex.lock().unwrap().close();
@@ -144,6 +140,8 @@ impl Cluster {
         false
     }
 
+    /// Poll readable events and handle, include read_close event (we handle it same as readable)
+    /// Commit transfer data task to thread pool.
     fn commit_transfer_task(&self, tun_mutex: Arc<Mutex<TcpTun>>, from_token: Token) {
         let tunnels = self.tunnels.clone();
         let poller = self.poller.clone();
@@ -156,7 +154,7 @@ impl Cluster {
         match tun_mutex.lock().unwrap().transfer_data(from_token) {
             Ok(_) => {}
             Err(e) => {
-                tun_mutex.lock().unwrap().deregister(poller.lock().as_ref().unwrap());
+                tun_mutex.lock().unwrap().deregister(poller.lock().as_ref().unwrap()).unwrap();
                 Self::un_cache_tun(tunnels.clone(), tun_mutex.clone());
                 tun_mutex.lock().unwrap().close();
                 let src_addr = tun_mutex.lock().unwrap().source_addr;
@@ -188,11 +186,6 @@ impl ForwardServer {
     pub fn register(&mut self, poller: &Poll) -> std::io::Result<()> {
         poller.registry().register(&mut self.listener, self.token, Interest::READABLE)?;
         Ok(())
-    }
-
-    pub fn accept(&self) -> std::io::Result<TcpStream> {
-        let (stream, _) = self.listener.accept()?;
-        Ok(stream)
     }
 
     pub fn accept_connect(&self) -> std::io::Result<TcpTun> {
@@ -230,7 +223,7 @@ impl TcpTun {
         let remote_addr = self.target_addr;
         let stream_target = TcpStream::connect(remote_addr)?;
         self.target = Some(stream_target);
-        println!("Successfully connected to remote in {}", remote_addr);
+        println!("Successfully connected to {}", remote_addr);
         Ok(())
     }
 
@@ -271,13 +264,12 @@ impl TcpTun {
     }
 
     fn read_write(source: &mut TcpStream, target: &mut TcpStream, buffer: &mut [u8]) -> std::io::Result<usize> {
-        let mut count = 0;
         let result = source.read(buffer);
         if result.is_ok() {
-            let current_count = result.unwrap();
-            if current_count > 0 {
-                Self::write_to(target, buffer, current_count)?;
-                count += current_count;
+            let count = result.unwrap();
+            if count > 0 {
+                Self::write_to(target, buffer, count)?;
+                return Ok(count);
             } else {
                 return Err(create_broken_err(source));
             }
@@ -289,7 +281,6 @@ impl TcpTun {
                 return Err(err);
             }
         }
-        Ok(count)
     }
 
     fn write_to(target: &mut TcpStream, buffer: &[u8], size: usize) -> std::io::Result<usize> {
@@ -311,7 +302,7 @@ impl TcpTun {
 
     pub fn close(&self) {
         self.source.shutdown(Both);
-        if (self.target.is_some()) {
+        if self.is_established() {
             self.target.as_ref().unwrap().shutdown(Both);
         }
     }

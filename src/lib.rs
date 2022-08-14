@@ -90,7 +90,7 @@ impl Worker {
                     // println!("Worker {} got a job; executing.", id);
 
                     if job() {
-                        sender.lock().unwrap().send(Message::NewJob(job));
+                        sender.lock().unwrap().send(Message::NewJob(job)).unwrap();
                     }
                 }
                 Message::Terminate => {
