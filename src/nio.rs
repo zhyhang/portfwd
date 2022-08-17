@@ -153,17 +153,14 @@ impl Cluster {
     fn transfer_task(tun_mutex: Arc<Mutex<TcpTun>>, from_token: Token,
                      tunnels: Arc<Mutex<HashMap<Token, Arc<Mutex<TcpTun>>>>>, poller: Arc<Mutex<Poll>>) -> bool {
         let result = tun_mutex.lock().unwrap().transfer_data(from_token);
-        match result {
-            Ok(_) => {}
-            Err(e) => {
-                //ignore the deregister error
-                tun_mutex.lock().unwrap().deregister(poller.lock().as_ref().unwrap());
-                Self::un_cache_tun(tunnels.clone(), tun_mutex.clone());
-                tun_mutex.lock().unwrap().close();
-                let src_addr = tun_mutex.lock().unwrap().source_addr;
-                let target_addr = tun_mutex.lock().unwrap().target_addr;
-                println!("Copy from {} to {} error {}", src_addr, target_addr, e);
-            }
+        if let Err(e) = result {
+            //ignore the deregister error
+            let _ = tun_mutex.lock().unwrap().deregister(poller.lock().as_ref().unwrap());
+            Self::un_cache_tun(tunnels.clone(), tun_mutex.clone());
+            tun_mutex.lock().unwrap().close();
+            let src_addr = tun_mutex.lock().unwrap().source_addr;
+            let target_addr = tun_mutex.lock().unwrap().target_addr;
+            println!("Copy from {} to {} error {}", src_addr, target_addr, e);
         }
         false
     }
@@ -313,9 +310,9 @@ impl TcpTun {
     }
 
     pub fn close(&self) {
-        self.source.shutdown(Both);
+        let _ = self.source.shutdown(Both);
         if self.is_established() {
-            self.target.as_ref().unwrap().shutdown(Both);
+            let _ = self.target.as_ref().unwrap().shutdown(Both);
         }
     }
 }
