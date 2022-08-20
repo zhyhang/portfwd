@@ -10,6 +10,7 @@ use mio::event::Event;
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token};
 
+use crate::InputArgs;
 use portfwd::ThreadPool;
 
 const EVENTS_CAPACITY: usize = 1024;
@@ -46,19 +47,17 @@ impl Cluster {
         })
     }
 
-    pub fn start_with(&mut self, forward_addrs: &[String]) -> std::io::Result<()> {
+    pub fn start_with(&mut self, forward_addrs: InputArgs) -> std::io::Result<()> {
         //start listeners in term of input args
-        for addr_i in (0..forward_addrs.len()).step_by(2) {
-            let local_addr = forward_addrs.get(addr_i);
-            let remote_addr = forward_addrs.get(addr_i + 1);
-            self.listen(local_addr.unwrap(), remote_addr.unwrap())?;
+        for (local_addr, remote_addr) in forward_addrs.local_remote {
+            self.listen(local_addr, remote_addr)?;
         }
         //infinite loop to poll events and deal them
         self.event_loop()?;
         Ok(())
     }
 
-    fn listen(&mut self, local_addr: &String, remote_addr: &String) -> std::io::Result<()> {
+    fn listen(&mut self, local_addr: SocketAddr, remote_addr: SocketAddr) -> std::io::Result<()> {
         match ForwardServer::start(local_addr, remote_addr) {
             Ok(mut server) => {
                 server.register(self.poller.lock().as_ref().unwrap())?;
@@ -227,9 +226,10 @@ struct ForwardServer {
 }
 
 impl ForwardServer {
-    pub fn start(local_addr: &String, remote_addr: &String) -> std::io::Result<ForwardServer> {
-        let local_addr = local_addr.parse().unwrap();
-        let remote_addr = remote_addr.parse().unwrap();
+    pub fn start(
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+    ) -> std::io::Result<ForwardServer> {
         let listener = TcpListener::bind(local_addr)?;
         let token = create_token();
         Ok(ForwardServer {
