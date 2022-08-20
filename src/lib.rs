@@ -1,3 +1,5 @@
+mod cmd_line;
+
 use std::sync::mpsc;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
