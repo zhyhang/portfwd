@@ -13,5 +13,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     cluster.start_with(&args[1..])?;
     Ok(())
 }
-
-

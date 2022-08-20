@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use std::sync::mpsc;
-use std::sync::mpsc::{Sender};
+use std::sync::mpsc::Sender;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 
@@ -43,8 +43,8 @@ impl ThreadPool {
     }
 
     pub fn execute<F>(&self, f: F)
-        where
-            F: Fn() -> bool + Send + 'static,
+    where
+        F: Fn() -> bool + Send + 'static,
     {
         let job = Box::new(f);
 
@@ -79,7 +79,11 @@ struct Worker {
 }
 
 impl Worker {
-    fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Message>>>, sender: Arc<Mutex<Sender<Message>>>) -> Worker {
+    fn new(
+        id: usize,
+        receiver: Arc<Mutex<mpsc::Receiver<Message>>>,
+        sender: Arc<Mutex<Sender<Message>>>,
+    ) -> Worker {
         let thread = thread::spawn(move || loop {
             let message = receiver.lock().unwrap().recv().unwrap();
 
