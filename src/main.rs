@@ -1,5 +1,3 @@
-extern crate core;
-
 use crate::cmd_line::InputArgs;
 use crate::nio::Cluster;
 use clap::Parser;
