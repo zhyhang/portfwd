@@ -6,8 +6,8 @@ use std::net::{AddrParseError, SocketAddr};
 #[clap(author, version, about, long_about = None)] // Read from `Cargo.toml`
 pub struct InputArgs {
     /// Local address remote address pairs.
+    /// Address format: ip:port.
     /// Example: 127.0.0.1:8080,192.168.0.100:80 0.0.0.0:1080,192.168.0.100:1080
-    /// Address format: ip:port
     #[clap(required = true, value_parser = parse_socket_addrs)]
     pub local_remote: Vec<(SocketAddr, SocketAddr)>,
 }
