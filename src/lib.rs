@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod tests;
 mod cmd_line;
 
 use std::sync::mpsc;
